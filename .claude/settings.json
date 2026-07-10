@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "tooluniverse": {
+      "source": {
+        "source": "github",
+        "repo": "mims-harvard/tooluniverse"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "tooluniverse@tooluniverse": true
+  }
+}
