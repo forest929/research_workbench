@@ -2,9 +2,9 @@ import Badge from './Badge'
 
 const DIMS = [
   { key: 'faithfulness', label: 'Faithfulness' },
-  { key: 'integrity', label: 'Integrity' },
   { key: 'citation_accuracy', label: 'Citation accuracy' },
-  { key: 'uncertainty', label: 'Uncertainty flagged' },
+  { key: 'relevance', label: 'Relevance' },
+  { key: 'completeness', label: 'Completeness' },
 ]
 
 function ScoreBar({ score, max = 5 }) {
@@ -23,18 +23,20 @@ function ScoreBar({ score, max = 5 }) {
 export default function JudgeScorecard({ verdict }) {
   if (!verdict) return null
 
-  const overall = verdict.overall ?? verdict.overall_score
+  // Consistent headline everywhere: the total across the four dimensions, out of
+  // 20 (4 × 5). Computed from the dimension scores, not the model's free-form
+  // "overall", so it always matches the bars below.
+  const total = DIMS.reduce((s, { key }) => s + (Number(verdict[key] ?? verdict[`${key}_score`]) || 0), 0)
+  const maxTotal = DIMS.length * 5
   const v = verdict.verdict?.toLowerCase()
-  const verdictColor = v === 'pass' ? 'green' : v === 'death_spiral' ? 'red' : 'amber'
+  const verdictColor = v === 'pass' ? 'green' : (v === 'fail' || v === 'death_spiral') ? 'red' : 'amber'
 
   return (
     <div className="card p-4 space-y-3">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-slate-800">LLM-as-Judge</h3>
         <div className="flex items-center gap-2">
-          {overall !== undefined && (
-            <span className="text-lg font-bold text-slate-900">{Number(overall).toFixed(1)}<span className="text-xs font-normal text-slate-400">/5</span></span>
-          )}
+          <span className="text-lg font-bold text-slate-900">{total}<span className="text-xs font-normal text-slate-400">/{maxTotal}</span></span>
           {v && <Badge color={verdictColor}>{v.toUpperCase()}</Badge>}
         </div>
       </div>

@@ -20,6 +20,8 @@ def _get_generation_client() -> AsyncOpenAI:
         _generation_client = AsyncOpenAI(
             base_url=_settings.token_factory_base_url,
             api_key=_settings.nebius_key or "placeholder",
+            timeout=_settings.generation_timeout_s,
+            max_retries=_settings.generation_max_retries,
         )
     return _generation_client
 

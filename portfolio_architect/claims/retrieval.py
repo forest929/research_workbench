@@ -12,12 +12,12 @@ cosine loops in feedback/decision_memory.py — the claim table runs into the
 thousands at 4096-dim, where a single matrix-vector product is far faster.
 """
 
-import json
 from uuid import UUID
 
 import numpy as np
 
 from portfolio_architect.db.pool import _ConnProxy
+from portfolio_architect.embedding import codec
 from portfolio_architect.embedding import client as embedding
 
 
@@ -44,7 +44,7 @@ async def retrieve_claims_for_topic(
 
     query_vec = np.array(await embedding.embed_text(topic), dtype=np.float32)
 
-    matrix = np.array([json.loads(r["claim_embedding"]) for r in rows], dtype=np.float32)
+    matrix = np.array([codec.decode(r["claim_embedding"]) for r in rows], dtype=np.float32)
     if matrix.shape[1] != query_vec.shape[0]:
         raise ValueError(
             f"Embedding dimension mismatch: query is {query_vec.shape[0]}-dim but "

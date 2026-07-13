@@ -16,7 +16,6 @@ Usage:
 
 import argparse
 import asyncio
-import json
 import sys
 from pathlib import Path
 from uuid import UUID
@@ -29,6 +28,7 @@ load_dotenv()
 
 from portfolio_architect.db.pool import create_pool, close_pool
 from portfolio_architect.db.migrations import run_migrations
+from portfolio_architect.embedding import codec
 
 
 async def main(args) -> None:
@@ -47,7 +47,7 @@ async def main(args) -> None:
             )
         print(f"Loaded {len(rows)} cluster representatives; parsing embeddings...")
         ids = [r["cluster_id"] for r in rows]
-        mat = np.array([json.loads(r["claim_embedding"]) for r in rows], dtype=np.float32)
+        mat = np.array([codec.decode(r["claim_embedding"]) for r in rows], dtype=np.float32)
         print(f"Matrix {mat.shape}; computing top-2 PCA via covariance eigendecomposition...")
 
         mean = mat.mean(axis=0)

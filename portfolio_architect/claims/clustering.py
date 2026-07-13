@@ -11,17 +11,24 @@ embeddings (Qwen3-Embedding-8B), where a vectorized matrix product is
 meaningfully faster than nested Python loops.
 """
 
-import json
 import re
 from uuid import UUID
 
 import numpy as np
 
 from portfolio_architect.db.pool import _ConnProxy
+from portfolio_architect.embedding import codec
 from portfolio_architect.db.claim_clusters import get_claims_with_embeddings, insert_cluster
 
 SIMILARITY_THRESHOLD = 0.82
 MIN_DISTINCT_DOCUMENTS = 2
+
+# Below this many distinct claim-bearing documents, similarity sub-clustering +
+# the >=2-document rule leave almost every claim as an isolated singleton (a small
+# corpus rarely has two papers making a near-identical claim about the same drug).
+# In that regime we fall back to drug-level clustering: one cluster per drug, so
+# the map shows drug groupings instead of scattered points. Adjustable knob.
+SMALL_CORPUS_MAX_DOCS = 50
 
 # Normalized intervention keys that mean "no drug intervention" — observational /
 # biomarker / prognostic studies where the LLM set intervention to "None (...)" or
@@ -30,49 +37,29 @@ MIN_DISTINCT_DOCUMENTS = 2
 # "none"/"null" clusters. Excluded from both multi-source and singleton clustering.
 NON_INTERVENTION_KEYS = {"none", "null", "unknown", ""}
 
-# Bare acronym/brand name -> canonical generic name. Applied only as an
-# exact-match substitution on the fully-normalized key, so combination
-# regimens (which must stay distinct — "adjuvant" vs "neoadjuvant"
-# chemotherapy, "trastuzumab + pertuzumab" vs plain trastuzumab deruxtecan)
-# are never affected. Only fires when the intervention field is *just* the
-# alias alone.
-DRUG_ALIASES = {
-    "t dxd": "trastuzumab deruxtecan",
-    "dato dxd": "datopotamab deruxtecan",
-    "t dm1": "trastuzumab emtansine",
-    "lynparza": "olaparib",
-    "keytruda": "pembrolizumab",
-    "avastin": "bevacizumab",
-    "zejula": "niraparib",
-    "rubraca": "rucaparib",
-    "tecentriq": "atezolizumab",
-    "imfinzi": "durvalumab",
-    "opdivo": "nivolumab",
-    "jemperli": "dostarlimab",
-    "femara": "letrozole",
-    "arimidex": "anastrozole",
-    "nolvadex": "tamoxifen",
-    "verzenio": "abemaciclib",
-    "ibrance": "palbociclib",
-    "kisqali": "ribociclib",
-    "trodelvy": "sacituzumab govitecan",
-}
-
-
 def normalize_intervention(intervention: str | None) -> str:
-    """Blocking key: lowercase, strip parenthetical annotations and punctuation."""
+    """Cleaned blocking key: lowercase, strip parenthetical annotations and
+    punctuation. This is the RAW key; surface variants of one drug are unified
+    afterwards by the LLM-built canonical map (see claims/drug_normalizer.py),
+    not by hardcoded alias/word-form tables."""
     if not intervention:
         return "unknown"
     text = re.sub(r"\([^)]*\)", "", intervention)  # strip "(DRUG)" / "(BIOLOGICAL)" etc.
     text = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-    text = text or "unknown"
-    return DRUG_ALIASES.get(text, text)
+    return text or "unknown"
 
 
-def build_blocks(claims: list[dict]) -> dict[str, list[dict]]:
+def block_key(intervention: str | None, canonical: dict[str, str] | None = None) -> str:
+    """The blocking key a claim clusters under: the cleaned raw key, mapped
+    through the LLM-built canonical map when one is supplied."""
+    raw = normalize_intervention(intervention)
+    return canonical.get(raw, raw) if canonical else raw
+
+
+def build_blocks(claims: list[dict], canonical: dict[str, str] | None = None) -> dict[str, list[dict]]:
     blocks: dict[str, list[dict]] = {}
     for c in claims:
-        key = normalize_intervention(c.get("intervention"))
+        key = block_key(c.get("intervention"), canonical)
         blocks.setdefault(key, []).append(c)
     return blocks
 
@@ -100,7 +87,7 @@ def cluster_block(claims: list[dict], threshold: float = SIMILARITY_THRESHOLD) -
         return [[c] for c in claims]
 
     ids = [c["id"] for c in claims]
-    matrix = np.array([json.loads(c["claim_embedding"]) for c in claims], dtype=np.float32)
+    matrix = np.array([codec.decode(c["claim_embedding"]) for c in claims], dtype=np.float32)
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     norms[norms == 0] = 1e-9
     normalized = matrix / norms
@@ -134,15 +121,30 @@ async def cluster_project_claims(
     claims = await get_claims_with_embeddings(
         conn, project_id, verified_only=verified_only, exclude_trials=exclude_trials
     )
-    blocks = build_blocks(claims)
+    # Automatic drug-name canonicalization (LLM, cached) so surface variants of a
+    # drug ("HPV vaccination"/"vaccine"/"vaccines", brand vs generic) block
+    # together. Local import avoids a circular dependency at module load.
+    from portfolio_architect.claims.drug_normalizer import build_canonical_map
+    canonical = await build_canonical_map(
+        conn, {normalize_intervention(c.get("intervention")) for c in claims},
+        project_id=project_id,
+    )
+    blocks = build_blocks(claims, canonical)
+
+    # On a small corpus, group each drug's claims into a single drug-level cluster
+    # (skip the within-drug similarity split and the >=2-document rule) so the map
+    # shows one node per drug instead of a scatter of singletons.
+    small_corpus = len({c["document_id"] for c in claims}) <= SMALL_CORPUS_MAX_DOCS
+    effective_min_documents = 1 if small_corpus else min_documents
 
     created = []
     for intervention_key, block_claims in blocks.items():
         if intervention_key in NON_INTERVENTION_KEYS:
             continue  # observational / no-drug claims — not a drug cluster
-        for group in cluster_block(block_claims, threshold):
+        groups = [block_claims] if small_corpus else cluster_block(block_claims, threshold)
+        for group in groups:
             doc_ids = {c["document_id"] for c in group}
-            if len(group) < 2 or len(doc_ids) < min_documents:
+            if len(group) < 2 or len(doc_ids) < effective_min_documents:
                 continue
             verdict_mix: dict[str, int] = {}
             for c in group:
@@ -171,9 +173,15 @@ async def add_singleton_clusters(
         """,
         str(project_id),
     )
+    # Reuse the canonical map the main pass already cached (cache-only — no LLM),
+    # so a leftover single-paper drug shows under the same canonical name.
+    from portfolio_architect.claims.drug_normalizer import load_aliases
+    canonical = await load_aliases(
+        conn, [normalize_intervention(c.get("intervention")) for c in rows]
+    )
     created = []
     for c in rows:
-        intervention_key = normalize_intervention(c.get("intervention"))
+        intervention_key = block_key(c.get("intervention"), canonical)
         if intervention_key in NON_INTERVENTION_KEYS:
             continue  # observational / no-drug claims — keep off the map
         row = await insert_cluster(

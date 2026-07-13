@@ -45,5 +45,25 @@ async def update_scope_statement(conn: _ConnProxy, project_id: UUID, scope_state
     )
 
 
+async def update_disease_vocab(conn: _ConnProxy, project_id: UUID, vocab_json: str) -> None:
+    await conn.execute(
+        "UPDATE projects SET disease_vocab_json = ?, updated_at = datetime('now') WHERE id = ?",
+        vocab_json, str(project_id),
+    )
+
+
 async def list_projects(conn: _ConnProxy) -> list[dict]:
     return await conn.fetch("SELECT * FROM projects ORDER BY created_at DESC")
+
+
+async def delete_project(conn: _ConnProxy, project_id: UUID | str) -> None:
+    """Delete a project and everything under it. Child tables (documents, claims,
+    clusters, chunks, saved_publications, user_sources) are ON DELETE CASCADE and
+    the pool enables PRAGMA foreign_keys, so one delete cleans up the whole tree.
+
+    chunks_fts is an FTS5 virtual table with no foreign key, so the cascade never
+    reaches it — we purge its rows explicitly by project_id (a single FTS scan,
+    versus a per-chunk scan a trigger would cost) to avoid orphaning search rows."""
+    pid = str(project_id)
+    await conn.execute("DELETE FROM chunks_fts WHERE project_id = ?", pid)
+    await conn.execute("DELETE FROM projects WHERE id = ?", pid)

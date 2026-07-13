@@ -9,7 +9,7 @@ const PATTERNS = [
   { re: /^https?:\/\//,           url: (m) => m[0],                                             label: null },
 ]
 
-function resolveSource(id) {
+export function resolveSource(id) {
   if (!id) return null
   const s = id.trim()
   for (const { re, url, label } of PATTERNS) {
@@ -17,6 +17,13 @@ function resolveSource(id) {
     if (m) return { href: url(m), label }
   }
   return null
+}
+
+/** True when a token looks like a known source identifier (pmid:, arxiv:, DOI,
+ *  NCT, CARD, or bare URL). Used to tell real inline citations apart from
+ *  incidental square brackets in synthesized text (e.g. "[95% CI ...]"). */
+export function isSourceId(token) {
+  return resolveSource(token) !== null
 }
 
 /**

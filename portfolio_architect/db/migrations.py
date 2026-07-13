@@ -24,6 +24,9 @@ ALTER_STATEMENTS = [
     # joined an existing corpus cluster — drive the distinct "user" bubble style.
     "ALTER TABLE claim_clusters ADD COLUMN origin TEXT NOT NULL DEFAULT 'corpus'",
     "ALTER TABLE claim_clusters ADD COLUMN user_claim_count INTEGER NOT NULL DEFAULT 0",
+    # Cached LLM-as-judge verdict (flat JSON) for the cluster's synthesized
+    # answer — computed once on demand, then reused (one judge call per answer).
+    "ALTER TABLE claim_clusters ADD COLUMN judge_json TEXT",
 ]
 
 DDL_STATEMENTS = [
@@ -68,6 +71,10 @@ DDL_STATEMENTS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project_id)",
+    # Without this, ON DELETE CASCADE from documents does a full chunks scan per
+    # deleted document, making project deletion O(documents x chunks) — minutes on
+    # a large corpus. This FK index turns each cascade into an index lookup.
+    "CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_no_embed ON chunks(project_id) WHERE embedding IS NULL",
     """
     CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -266,6 +273,50 @@ DDL_STATEMENTS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_user_sources_project ON user_sources(project_id)",
+    # Curated reading list: publications a researcher explicitly bookmarks while
+    # reviewing clusters/conversations, or adds by DOI. Project-scoped, so each
+    # project keeps its own separate curated set. UNIQUE(project_id, source_id)
+    # makes save idempotent and lets ON CONFLICT upsert the note/title.
+    """
+    CREATE TABLE IF NOT EXISTS saved_publications (
+        id          TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        source_id   TEXT NOT NULL,
+        doi         TEXT,
+        title       TEXT,
+        note        TEXT,
+        added_from  TEXT NOT NULL DEFAULT 'conversation',
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_saved_pubs_project ON saved_publications(project_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_pubs_project_source ON saved_publications(project_id, source_id)",
+    # Research-assistant Q&A history — every question + its cited, judged answer,
+    # saved so a researcher can revisit past follow-ups. `payload_json` is the
+    # full conversation-shaped result so the UI can re-render it exactly.
+    """
+    CREATE TABLE IF NOT EXISTS assistant_answers (
+        id           TEXT PRIMARY KEY,
+        project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        question     TEXT NOT NULL,
+        answer       TEXT,
+        payload_json TEXT NOT NULL,
+        created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_assistant_answers_project ON assistant_answers(project_id, created_at)",
+    # Automatic drug-name canonicalization cache. `raw_key` is the cleaned
+    # intervention string (output of normalize_intervention); `canonical` is the
+    # LLM-assigned canonical name that groups its surface variants. Global (not
+    # per-project) so a name canonicalized once is reused everywhere — this is
+    # what makes the LLM pass one-time and the mapping deterministic.
+    """
+    CREATE TABLE IF NOT EXISTS drug_aliases (
+        raw_key    TEXT PRIMARY KEY,
+        canonical  TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
 ]
 
 
@@ -295,6 +346,22 @@ async def run_migrations(pool: _Pool, create_vector_index: bool = False) -> None
                 await conn.execute(stmt)
             except Exception:
                 pass
+
+        # Per-project disease vocabulary. The ALTER + backfill are paired inside
+        # one try: the UPDATE runs ONLY the first time the column is added (when
+        # the ALTER succeeds), so existing projects get seeded with the
+        # women's-cancer default while projects created later start unconfigured
+        # (NULL) and are never retroactively seeded on subsequent boots.
+        try:
+            await conn.execute("ALTER TABLE projects ADD COLUMN disease_vocab_json TEXT")
+            import json as _json
+            from portfolio_architect.vocab import DEFAULT_DISEASE_VOCAB
+            await conn.execute(
+                "UPDATE projects SET disease_vocab_json = ? WHERE disease_vocab_json IS NULL",
+                _json.dumps(DEFAULT_DISEASE_VOCAB),
+            )
+        except Exception:
+            pass
     print("Migrations complete.")
 
 

@@ -10,11 +10,11 @@ Degrades gracefully:
 - ≥5 examples  → k-NN with k = 5
 """
 
-import json
 import math
 from uuid import UUID
 
 from portfolio_architect.db.pool import _ConnProxy
+from portfolio_architect.embedding import codec
 
 _DEFAULT_K = 5
 
@@ -57,7 +57,7 @@ async def _load_labeled_examples(conn: _ConnProxy, project_id: UUID) -> tuple[li
         "SELECT doc_embedding, human_label FROM decisions WHERE project_id = ? AND doc_embedding IS NOT NULL",
         str(project_id),
     )
-    embeddings = [json.loads(r["doc_embedding"]) for r in rows]
+    embeddings = [codec.decode_list(r["doc_embedding"]) for r in rows]
     labels = [r["human_label"] for r in rows]
     return embeddings, labels
 
@@ -98,7 +98,7 @@ async def rank_pending_documents(
 
     results = []
     for r in rows:
-        doc_emb = json.loads(r["doc_embedding"]) if r.get("doc_embedding") else None
+        doc_emb = codec.decode_list(r["doc_embedding"]) if r.get("doc_embedding") else None
         if doc_emb and embeddings:
             pred_label, confidence = _knn_predict(doc_emb, embeddings, labels, k)
             uncertainty = abs(confidence - 0.5)

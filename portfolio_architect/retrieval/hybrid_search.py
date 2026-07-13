@@ -4,11 +4,12 @@ Vector leg: numpy cosine similarity over stored embeddings (no pgvector needed).
 Keyword leg: SQLite FTS5.
 """
 
-import json
 import re
 
 import numpy as np
 from uuid import UUID
+
+from portfolio_architect.embedding import codec
 
 from portfolio_architect.embedding.client import embed_text
 from portfolio_architect.config import get_settings
@@ -51,7 +52,7 @@ async def search_chunks(
             )
             scored: list[tuple[float, dict]] = []
             for row in rows:
-                vec = np.array(json.loads(row["embedding"]), dtype=np.float32)
+                vec = codec.decode(row["embedding"])
                 norm = float(np.linalg.norm(vec))
                 if norm > 0:
                     sim = float(np.dot(q_unit, vec / norm))

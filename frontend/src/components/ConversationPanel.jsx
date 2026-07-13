@@ -1,7 +1,71 @@
-import { Quote, CheckCircle2, AlertCircle, ChevronDown, ChevronUp, Loader2, Sigma, TrendingUp, Calendar } from 'lucide-react'
+import { useParams } from 'react-router-dom'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { Quote, CheckCircle2, AlertCircle, ChevronDown, ChevronUp, Loader2, Sigma, TrendingUp, Calendar, Scale, Bookmark } from 'lucide-react'
 import Badge from './Badge'
 import SourceLink from './SourceLink'
+import CitedAnswer from './CitedAnswer'
+import SaveButton from './SaveButton'
+import JudgeScorecard from './JudgeScorecard'
 import LoadingSpinner from './LoadingSpinner'
+import useReadingList from '../hooks/useReadingList'
+import { judgeCluster, saveClusterSources } from '../api'
+
+/** LLM-as-judge for the cluster's answer: run once (cached). The scores and
+ *  per-dimension rationale are shown as feedback for the researcher's reference. */
+function JudgeSection({ detail }) {
+  const { id: projectId } = useParams()
+  const qc = useQueryClient()
+  const invalidate = () => qc.invalidateQueries({ queryKey: ['clusterDetail', projectId] })
+  const judge = useMutation({ mutationFn: () => judgeCluster(projectId, detail.id), onSuccess: invalidate })
+
+  if (detail.judge) {
+    return <JudgeScorecard verdict={detail.judge} />
+  }
+
+  return (
+    <div>
+      <button
+        onClick={() => judge.mutate()}
+        disabled={judge.isPending}
+        className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border border-slate-200
+                   text-sm text-blue-600 hover:bg-blue-50 disabled:opacity-60 transition-colors"
+      >
+        {judge.isPending
+          ? <><Loader2 size={14} className="animate-spin" /> Judging the answer…</>
+          : <><Scale size={14} /> Run LLM judge on this answer</>}
+      </button>
+      {judge.isError && (
+        <p className="text-xs text-amber-600 mt-1">{String(judge.error?.message || judge.error)}</p>
+      )}
+    </div>
+  )
+}
+
+/** Save every source under this research question to the reading list at once. */
+function SaveAllButton({ detail }) {
+  const { id: projectId } = useParams()
+  const qc = useQueryClient()
+  const { savedIds } = useReadingList(projectId)
+  const shownSources = [...new Set((detail.members || []).map((m) => m.source_id).filter(Boolean))]
+  const allShownSaved = shownSources.length > 0 && shownSources.every((s) => savedIds.has(s))
+
+  const save = useMutation({
+    mutationFn: () => saveClusterSources(projectId, detail.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['readingList', projectId] }),
+  })
+
+  return (
+    <button
+      onClick={() => save.mutate()}
+      disabled={save.isPending || allShownSaved}
+      className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 hover:text-blue-800 disabled:text-slate-400 disabled:cursor-default"
+      title="Save all of this question's sources to the reading list"
+    >
+      {save.isPending ? <Loader2 size={12} className="animate-spin" /> : <Bookmark size={12} />}
+      {allShownSaved ? 'All sources saved' : 'Save all sources'}
+    </button>
+  )
+}
 
 // A field counts as "reported" only if it isn't a null / not-reported marker.
 const _NULL_RE = /^\s*(null|none|nr|n\/?a|not applicable|not reported|not explicitly.*|not stated|not specified|unclear)\s*$/i
@@ -54,10 +118,12 @@ function VerdictMix({ mix }) {
   )
 }
 
-/** One piece of evidence: CLAIM + its verdict + the quoted passage + source. */
-export function EvidenceItem({ m }) {
+/** One piece of evidence: CLAIM + its verdict + the quoted passage + source.
+ *  `anchorId` (set for the first card of each source) is the scroll target a
+ *  citation number jumps to. */
+export function EvidenceItem({ m, anchorId }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white px-3.5 py-3">
+    <div id={anchorId} className="rounded-lg border border-slate-200 bg-white px-3.5 py-3 scroll-mt-4 transition-shadow duration-300">
       <div className="flex items-start justify-between gap-2">
         <p className="text-sm text-slate-800 leading-snug flex-1">
           <span className="font-semibold text-slate-500 mr-1">CLAIM:</span>
@@ -86,8 +152,9 @@ export function EvidenceItem({ m }) {
           )}
         </div>
       )}
-      <div className="mt-2 flex items-center gap-2">
+      <div className="mt-2 flex items-center gap-2 flex-wrap">
         <SourceLink id={m.source_id} />
+        <SaveButton source_id={m.source_id} added_from="conversation" showLabel />
         {formatPubDate(m.pub_date) && (
           <span className="inline-flex items-center gap-0.5 text-[10px] text-slate-500" title="Publication date">
             <Calendar size={10} className="text-slate-400" /> {formatPubDate(m.pub_date)}
@@ -143,16 +210,30 @@ export default function ConversationPanel({ detail, loading, showingAll, onToggl
       {detail.answer && (
         <div className="rounded-lg bg-blue-50/60 border border-blue-100 px-4 py-3">
           <p className="text-[10px] font-semibold uppercase tracking-wide text-blue-500 mb-1">Synthesized evidence</p>
-          <p className="text-sm text-slate-700 leading-relaxed">{detail.answer}</p>
+          <CitedAnswer text={detail.answer} />
         </div>
       )}
 
+      {detail.answer && <JudgeSection detail={detail} />}
+
       <div>
-        <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-2">
-          Evidence — showing {detail.members?.length || 0} of {detail.member_count} verified claims
-        </p>
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+            Evidence — showing {detail.members?.length || 0} of {detail.member_count} verified claims
+          </p>
+          {detail.id && <SaveAllButton detail={detail} />}
+        </div>
         <div className="space-y-2">
-          {detail.members?.map((m) => <EvidenceItem key={m.id} m={m} />)}
+          {(() => {
+            const seen = new Set()
+            return detail.members?.map((m) => {
+              const first = m.source_id && !seen.has(m.source_id)
+              if (first) seen.add(m.source_id)
+              // Anchor only the first card per source → citation jumps land here,
+              // and DOM ids stay unique.
+              return <EvidenceItem key={m.id} m={m} anchorId={first ? `ev-${m.source_id}` : undefined} />
+            })
+          })()}
         </div>
 
         {/* Load-all toggle — only when the cluster has more than the concise set */}

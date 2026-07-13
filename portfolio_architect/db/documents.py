@@ -1,7 +1,27 @@
-import json
 from uuid import UUID, uuid4
 
 from portfolio_architect.db.pool import _ConnProxy
+from portfolio_architect.embedding import codec
+
+_META_FIELDS = ("Title", "Authors", "Journal", "Year", "DOI")
+
+
+def parse_source_metadata(raw_content: str | None) -> dict:
+    """Parse the structured header the ingest writes at the top of raw_content
+    (`Title:` / `Authors:` / `Journal:` / `Year:` / `DOI:` then `Abstract:`) into
+    a metadata dict. Missing fields come back as empty strings; never raises."""
+    out = {"title": "", "authors": "", "journal": "", "year": "", "doi": ""}
+    if not raw_content:
+        return out
+    for line in raw_content.splitlines():
+        if line.startswith("Abstract:"):
+            break
+        for field in _META_FIELDS:
+            prefix = field + ":"
+            if line.startswith(prefix):
+                out[field.lower()] = line[len(prefix):].strip()
+                break
+    return out
 
 
 async def insert_document(
@@ -57,7 +77,7 @@ async def update_chunk_embedding(
 ) -> None:
     await conn.execute(
         "UPDATE chunks SET embedding = ? WHERE id = ?",
-        json.dumps(embedding), str(chunk_id),
+        codec.encode(embedding), str(chunk_id),
     )
 
 

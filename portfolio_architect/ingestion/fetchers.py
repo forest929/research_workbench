@@ -1,19 +1,28 @@
-"""Literature fetchers: Google Scholar (primary) + arXiv (secondary).
+"""Literature fetchers: PubMed (primary for biomedical), Google Scholar, arXiv.
 
-Google Scholar is fetched via `scholarly` (no API key needed).
-arXiv uses the public Atom API.
+PubMed uses NCBI E-utilities (reliable, no key required; set NCBI_API_KEY to
+raise the rate limit). Google Scholar is fetched via `scholarly`. arXiv uses the
+public Atom API.
 """
 
+import json
+import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import date
 
 ARXIV_BASE = "https://export.arxiv.org/api/query"
 ARXIV_DELAY = 3.0
 ARXIV_NS = "http://www.w3.org/2005/Atom"
 _USER_AGENT = "AI-Portfolio-Architect/1.0 (research)"
+
+NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+NCBI_API_KEY = os.getenv("NCBI_API_KEY", "")
+# NCBI allows 3 req/s without a key, 10 with one — pace efetch batches to match.
+PUBMED_DELAY = 0.12 if NCBI_API_KEY else 0.34
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +189,110 @@ def _parse_arxiv_entry(entry: ET.Element) -> dict | None:
         "year": year,
         "doi": f"10.48550/arXiv.{arxiv_id}",
         "url": pub_url,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PubMed (NCBI E-utilities) — the reliable, relevant source for biomedical search
+# ---------------------------------------------------------------------------
+
+# Bias search toward recent work: restrict to the last N years by publication
+# date. Most-relevant WITHIN that window (relevance sort), so a fresh review
+# leans on current evidence.
+PUBMED_RECENT_YEARS = 5
+
+
+def _pubmed_search(query: str, max_records: int) -> list[str]:
+    """esearch → PubMed IDs for the query, most-relevant-first and limited to the
+    last PUBMED_RECENT_YEARS years by publication date. Paginates with retstart;
+    a bad page stops pagination rather than aborting."""
+    start_year = date.today().year - PUBMED_RECENT_YEARS
+    term = f'({query}) AND ("{start_year}"[pdat] : "3000"[pdat])'  # publication-date window
+    ids: list[str] = []
+    while len(ids) < max_records:
+        page = min(9999, max_records - len(ids))
+        params = {
+            "db": "pubmed", "term": term, "retmax": page, "retstart": len(ids),
+            "retmode": "json", "sort": "relevance",
+        }
+        if NCBI_API_KEY:
+            params["api_key"] = NCBI_API_KEY
+        try:
+            data = json.loads(_get(f"{NCBI_BASE}/esearch.fcgi?{urllib.parse.urlencode(params)}"))
+        except Exception:
+            break
+        batch = data.get("esearchresult", {}).get("idlist", [])
+        if not batch:
+            break
+        ids.extend(batch)
+        if len(batch) < page:
+            break
+        time.sleep(PUBMED_DELAY)
+    return ids[:max_records]
+
+
+def pubmed_fetch(query: str, max_records: int = 200, progress_cb=None) -> list[dict]:
+    """Search PubMed and return abstract records (efetch, batched by 200)."""
+    pmids = _pubmed_search(query, max_records)
+    records: list[dict] = []
+    for i in range(0, len(pmids), 200):
+        batch = pmids[i:i + 200]
+        params = {"db": "pubmed", "id": ",".join(batch), "retmode": "xml", "rettype": "abstract"}
+        if NCBI_API_KEY:
+            params["api_key"] = NCBI_API_KEY
+        try:
+            xml_bytes = _get(f"{NCBI_BASE}/efetch.fcgi?{urllib.parse.urlencode(params)}")
+            root = ET.fromstring(xml_bytes)
+        except Exception:
+            continue
+        for article in root.findall(".//PubmedArticle"):
+            rec = _parse_pubmed_article(article)
+            if rec:
+                records.append(rec)
+        if progress_cb:
+            progress_cb("pubmed_fetch", len(records))
+        time.sleep(PUBMED_DELAY)
+    return records
+
+
+def _parse_pubmed_article(article: ET.Element) -> dict | None:
+    medline = article.find("MedlineCitation")
+    art = medline.find("Article") if medline is not None else None
+    if art is None:
+        return None
+    pmid_el = medline.find("PMID")
+    pmid = pmid_el.text if pmid_el is not None else "unknown"
+    title_el = art.find("ArticleTitle")
+    title = ("".join(title_el.itertext()) if title_el is not None else "").strip()
+    abstract_parts = []
+    for ab in art.findall(".//AbstractText"):
+        label = ab.get("Label", "")
+        text = "".join(ab.itertext()).strip()
+        abstract_parts.append(f"{label}: {text}" if label else text)
+    abstract = " ".join(abstract_parts).strip()
+    if not title and not abstract:
+        return None
+    authors = []
+    for author in art.findall(".//Author"):
+        last = author.findtext("LastName", "")
+        fore = author.findtext("ForeName", "") or author.findtext("Initials", "")
+        if last:
+            authors.append(f"{last} {fore}".strip())
+    author_str = ", ".join(authors[:5]) + (" et al." if len(authors) > 5 else "")
+    journal = art.findtext(".//Title", "").strip()
+    pub_date = art.find(".//PubDate")
+    year = ""
+    if pub_date is not None:
+        year = pub_date.findtext("Year", "") or (pub_date.findtext("MedlineDate", "") or "")[:4]
+    doi = ""
+    for id_el in article.findall(".//ArticleId"):
+        if id_el.get("IdType") == "doi":
+            doi = id_el.text or ""
+            break
+    return {
+        "source": "pubmed", "source_id": f"pmid:{pmid}", "doc_type": "paper",
+        "title": title, "abstract": abstract, "authors": author_str,
+        "journal": journal, "year": year, "doi": doi,
     }
 
 

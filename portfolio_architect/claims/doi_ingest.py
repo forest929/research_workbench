@@ -20,7 +20,9 @@ from portfolio_architect.claims import projection
 from portfolio_architect.claims.clustering import normalize_intervention, NON_INTERVENTION_KEYS, SIMILARITY_THRESHOLD
 from portfolio_architect.claims.extraction import run_one
 from portfolio_architect.db.documents import insert_document
+from portfolio_architect.db.saved_publications import save_publication
 from portfolio_architect.embedding import client as embedding
+from portfolio_architect.embedding import codec
 
 _UA = {"User-Agent": "AI-Portfolio-Architect/1.0 (research; contact kexinwang929@gmail.com)"}
 _NCBI = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -106,16 +108,13 @@ def _record_to_text(rec: dict) -> str:
 
 # ── cluster assignment ───────────────────────────────────────────────────────
 
-def _cosine(a: np.ndarray, b: np.ndarray) -> float:
-    na, nb = np.linalg.norm(a), np.linalg.norm(b)
-    if na == 0 or nb == 0:
-        return 0.0
-    return float(a @ b / (na * nb))
-
-
 async def _best_cluster_for(conn, project_id, intervention_key: str, vec: np.ndarray) -> str | None:
     """Nearest existing cluster (same intervention block) by cosine of the new
-    claim vs candidate members. Returns cluster_id if within threshold, else None."""
+    claim vs candidate members. Returns cluster_id if within threshold, else None.
+
+    Vectorized: decode all candidate embeddings into one (n, dim) matrix and take
+    the cosine against the query in a single numpy op, rather than a Python loop
+    of per-row cosines over up to 4000 4096-dim vectors."""
     rows = await conn.fetch(
         """
         SELECT c.cluster_id, c.claim_embedding
@@ -125,12 +124,15 @@ async def _best_cluster_for(conn, project_id, intervention_key: str, vec: np.nda
         """,
         str(project_id), intervention_key,
     )
-    best_id, best_sim = None, 0.0
-    for r in rows:
-        sim = _cosine(vec, np.array(json.loads(r["claim_embedding"]), dtype=np.float32))
-        if sim > best_sim:
-            best_sim, best_id = sim, r["cluster_id"]
-    return best_id if best_sim >= SIMILARITY_THRESHOLD else None
+    if not rows:
+        return None
+    mat = np.array([codec.decode(r["claim_embedding"]) for r in rows], dtype=np.float32)  # (n, dim)
+    q = np.asarray(vec, dtype=np.float32)
+    norms = np.linalg.norm(mat, axis=1)
+    norms[norms == 0] = 1e-9
+    sims = (mat @ q) / (norms * (np.linalg.norm(q) or 1e-9))
+    best = int(np.argmax(sims))
+    return rows[best]["cluster_id"] if float(sims[best]) >= SIMILARITY_THRESHOLD else None
 
 
 async def _attach_to_cluster(conn, cluster_id: str, claim_id: str, verdict: str) -> None:
@@ -183,6 +185,18 @@ async def process_source(pool, project_id, user_source_id: str, doi: str) -> Non
             await _set_status(pool, user_source_id, status="failed",
                               message="Could not find an abstract for this DOI (PubMed/Crossref).")
             return
+
+        # Bookmark the resolved publication into the project's curated reading
+        # list right away — a DOI the user pastes lands in their list even if
+        # downstream claim extraction later yields nothing.
+        try:
+            async with pool.acquire() as conn:
+                await save_publication(
+                    conn, project_id, rec["source_id"], doi=doi,
+                    title=rec.get("title"), added_from="doi",
+                )
+        except Exception:
+            pass
 
         async with pool.acquire() as conn:
             doc = await insert_document(conn, project_id, rec["source_id"], _record_to_text(rec), doc_type="paper")
@@ -242,7 +256,7 @@ async def process_source(pool, project_id, user_source_id: str, doi: str) -> Non
         async with pool.acquire() as conn:
             for c, v in zip(inserted, vecs):
                 await conn.execute("UPDATE claims SET claim_embedding = ? WHERE id = ?",
-                                   json.dumps(v), c["id"])
+                                   codec.encode(v), c["id"])
                 c["vec"] = np.array(v, dtype=np.float32)
 
         await _set_status(pool, user_source_id, status="clustering",

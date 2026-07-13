@@ -1,18 +1,105 @@
 # AI Research Workbench
 
 A scientific research workbench for drug-therapy evidence, built on **Nebius AI
-Cloud**. It ingests biomedical literature, extracts structured claims, clusters
-them across papers, synthesizes cited answers, and visualizes the whole evidence
-landscape as an interactive map. You can also add your own sources by DOI and see
-where they land against the corpus.
+Cloud**. You ask a research question, and it searches the literature, extracts
+structured claims, clusters them across papers, synthesizes **cited answers**,
+grades each answer with an **LLM judge**, and lays the whole evidence landscape
+out as an interactive map. A built-in **research assistant** answers follow-up
+questions ("compare A vs B", "what contradicts the majority view", "where are the
+gaps?") over your corpus — each reply retrieved, cited, and self-checked by the
+judge.
 
 The bundled demo corpus is **women's cancer drug evidence** (breast, ovarian,
-cervical, endometrial): ~10k PubMed papers → ~27k claims → ~16k clusters, each
-multi-source cluster carrying a cited, synthesized answer.
+cervical, endometrial): ~10k PubMed papers → ~27k claims → ~440 multi-source
+clusters, each carrying a cited, synthesized answer.
 
-> Note: this repo grew out of an earlier "portfolio architect" screening tool
-> (the `agents/`, `feedback/`, `screening` code). The **workbench is the current
-> product** and the only surface in the React UI.
+> This repo grew out of an earlier "portfolio architect" screening tool; the
+> **workbench is the current product** and the only UI. The legacy screening
+> pipeline (`agents/`, `feedback/`, `ranking/`) is dormant — still in the tree,
+> but no longer wired to a route or the UI.
+
+## What it does
+
+- **Search-first start.** Type a question on the landing page → it creates a
+  review, searches **PubMed** (last 5 years, ~30 most-relevant papers by default),
+  and builds the evidence base. The pipeline (extract → embed → cluster → lay out
+  the map) runs hidden behind a single "Building…" state; you can cancel it.
+  Answers are synthesized **lazily** — when you open a cluster — so the map
+  appears fast. (Files / Excel / PDFs / DOI lists have their own import page.)
+- **3-pane console.** Papers (left) · evidence map + answer (center) · reading
+  list (right). Panes resize and toggle.
+  - **Papers** — every paper with full citation (journal · year · title ·
+    authors · PMID · DOI), searchable, infinite-scroll; click a title to
+    spotlight it on the map.
+  - **Map** — each bubble is a multi-source claim cluster; size ∝ claims,
+    color = dominant verdict. Drug × disease filters (cross-filtered — pick a
+    disease and the drug list narrows to that disease). Click a bubble for its
+    synthesized answer + per-source verified evidence.
+  - **Reading list** — bookmarks with notes, add-by-DOI, "save all" for a
+    filter, and **"New review from these"** to spin your curated selection into
+    the next round of research.
+- **Cited answers** — synthesized per cluster with deterministic numbered
+  citations `[1] [2]` and a linked evidence list. Clicking a citation jumps to
+  that source's evidence card **and** reveals the paper in the Papers / Reading
+  panels.
+- **Research assistant** ("Ask the evidence") — free-form questions answered by
+  retrieve → synthesize a cited answer → self-check with the judge. Every Q&A is
+  saved to history for later review.
+- **LLM-as-judge** — scores each answer (faithfulness / citation accuracy /
+  relevance / completeness, 1–5) with a separate judge model; cached per answer.
+- **Per-project disease vocabulary** — seeded from your question on creation,
+  editable — so any topic works, not just the women's-cancer demo.
+
+---
+
+## Architecture
+
+```
+Browser ─▶ React + Vite SPA (frontend/)          search-first landing + 3-pane console
+                │  dev server proxies /api → :8000
+                ▼
+        FastAPI backend (api/)  ─▶ Nebius Token Factory  (generation + judge LLM)
+                │               ─▶ Nebius AI Endpoint     (Qwen3-Embedding-8B)
+                ▼
+        SQLite via aiosqlite  — embeddings packed as float32 blobs
+```
+
+- **Backend** — 4 routers: `projects` (lifecycle, delete), `ingest` (search /
+  files / DOI + progress + **cancel**), `workbench` (clusters, cluster detail
+  with lazy synthesis, options, add-by-DOI, disease vocab, **judge**,
+  **assistant** + history, save-filtered, papers), `reading_list` (bookmarks +
+  **spin-off**). The DB layer (`db/pool.py`) is `aiosqlite` behind an
+  asyncpg-shaped proxy, so SQL is Postgres-ready.
+- **Embeddings** are packed `float32` bytes (`embedding/codec.py`); the decoder
+  also reads legacy JSON. Run `scripts/migrate_embeddings_to_blob.py --vacuum` to
+  convert + shrink an old database (a legacy JSON DB is ~4× larger and slow).
+- **LLMs** on Nebius Token Factory. Generation and the judge use distinct
+  models/prompts and separate clients (`llm/client.py`), keeping the judge
+  independent of the thing it grades.
+
+```
+api/routers/            projects · ingest · workbench · reading_list
+portfolio_architect/
+  db/                   pool (asyncpg-shim), migrations, per-table CRUD
+  embedding/            Nebius embed client + float32 storage codec
+  claims/               extraction, clustering, conversation synthesis, retrieval, add-by-DOI
+  judge/                conversation_judge (LLM-as-judge over answers)
+  assistant.py          research-assistant agent (retrieve → synthesize → judge)
+  ingestion/            fetchers (PubMed / Scholar / arXiv), chunker
+  llm/                  Token Factory client + prompts
+  vocab.py              per-project disease vocabulary (+ starter-vocab inference)
+frontend/src/pages/     Landing · NewProject · Workbench (3-pane console) · Ingest
+frontend/src/components/ PapersPanel · ReadingListPanel · ClusterMap · ConversationPanel · CitedAnswer · …
+scripts/                corpus build + maintenance utilities
+```
+
+### Nebius service mapping
+
+| Stage                          | Nebius service                   |
+|--------------------------------|----------------------------------|
+| Claim / text embedding         | AI Endpoints (GPU)               |
+| Answer generation + LLM judge  | Token Factory (serverless LLM)   |
+| Vector store                   | SQLite now → Managed PostgreSQL  |
 
 ---
 
@@ -33,15 +120,9 @@ From **[Nebius AI Studio](https://studio.nebius.ai)** you need:
 ## 2. Backend setup
 
 ```bash
-# from the repo root
 python3 -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -e .                     # installs deps declared in pyproject.toml
-```
-
-### Configure environment
-
-```bash
+pip install -e .
 cp .env.example .env
 ```
 
@@ -51,33 +132,26 @@ Edit `.env` — the values that matter:
 NEBIUS_KEY=sk-...                                   # your Nebius API key
 GENERATION_MODEL=meta-llama/Llama-3.3-70B-Instruct  # Token Factory model
 JUDGE_MODEL=nvidia/Llama-3_1-Nemotron-Ultra-253B-v1
+MAX_TOKENS_JUDGE=3072                               # judge is a reasoning model; needs room for <think> + JSON
 
-# Embedding endpoint — MUST be Qwen3-Embedding-8B / 4096-dim to match the corpus.
-# (.env.example still shows the older bge-m3 / 1024 defaults — override them.)
 NEBIUS_EMBEDDING_URL=https://<your-endpoint>.api.nebius.ai/v1/
 EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B
 EMBEDDING_DIM=4096
 
 DATABASE_PATH=portfolio_architect.db
-
-# Optional — only for the fine-tuned side-by-side comparison (self-hosted vLLM).
-# Leave blank; the workbench works fine without it.
-FINETUNED_BASE_URL=
-FINETUNED_MODEL=
+NCBI_API_KEY=                                       # optional — raises the PubMed rate limit
 ```
 
 > ⚠️ The embedding model/dimension **must** match what the corpus was built with
-> (`Qwen/Qwen3-Embedding-8B`, 4096). A mismatch makes all similarity/clustering
-> meaningless. Never commit `.env`.
+> (`Qwen/Qwen3-Embedding-8B`, 4096). A mismatch makes clustering meaningless.
+> Never commit `.env`.
 
 ---
 
 ## 3. Frontend setup
 
 ```bash
-cd frontend
-npm install
-cd ..
+cd frontend && npm install && cd ..
 ```
 
 The dev server proxies `/api` → `http://localhost:8000` (see
@@ -87,108 +161,92 @@ The dev server proxies `/api` → `http://localhost:8000` (see
 
 ## 4. Get data into the database
 
-The DB schema is created automatically on first backend start (migrations run in
-the FastAPI lifespan). Two options for content:
+The schema is created automatically on first backend start (migrations run in
+the FastAPI lifespan). Two options:
 
 ### Option A — Use the bundled corpus (fastest)
 
 The repo ships `portfolio_architect.db` already populated with the fully
 processed women's-cancer corpus (project id
 `100d1b89-e6bd-4628-a1d6-aefe89fcabe1`). **Skip to step 5.** You still need a
-valid `NEBIUS_KEY` + embedding endpoint for live features (add-by-DOI).
+valid `NEBIUS_KEY` + embedding endpoint for live features (search, add-by-DOI,
+the assistant).
 
-### Option B — Rebuild the corpus from scratch
+### Option B — Just search from the app
 
-Run the pipeline in order. Grab the project ID from the first command's output
-and reuse it. This makes many LLM + embedding calls — budget a few dollars and
-~1–2 hours.
-
-```bash
-# 1. Ingest PubMed papers (past 3 years, most-recent-first; skip chunk-embedding)
-python scripts/ingest_womens_cancer_drugs.py --pubmed-only --no-embed --max-records 12000
-export PID=<project-id-printed-above>
-
-# 2. Extract structured claims (~1 LLM call per paper)
-python scripts/extract_claims.py --project-id $PID --concurrency 12
-
-# 3. Embed the claims (Qwen3 endpoint)
-python scripts/backfill_claim_embeddings.py --project-id $PID
-
-# 4. Cluster claims (verified, PubMed-only; pure compute, no LLM)
-python scripts/rebuild_clusters.py --project-id $PID
-
-# 5. Precompute 2D map coordinates + save the PCA projection model
-python scripts/compute_cluster_coords.py --project-id $PID
-
-# 6. Synthesize a cited answer per multi-source cluster (~1 LLM call per cluster)
-python scripts/build_conversations.py --project-id $PID --min-members 2
-
-# 7. Backfill publication month/year from the PubMed cache
-python scripts/backfill_pub_dates.py --project-id $PID
-```
-
-Re-run steps 4–6 any time you want to re-cluster or re-synthesize.
+Start the app (step 5), type a question on the landing page, and it searches
+PubMed and builds the evidence base for you. For a large CLI rebuild, the
+`scripts/` pipeline does the same steps in bulk (see `scripts/` and
+`docs/workbench_build_log.md`).
 
 ---
 
 ## 5. Run it
 
-Two terminals (backend needs the venv active):
-
 ```bash
-# Terminal 1 — backend
+# Terminal 1 — backend (venv active)
 uvicorn api.main:app --reload --port 8000     # API docs at /docs
 
 # Terminal 2 — frontend
 cd frontend && npm run dev
 ```
 
-Open **http://localhost:5173**, select the *Women's Cancer Drug Evidence*
-project, and you're on the workbench.
+Open **http://localhost:5173**. Type a question to start a new review, or pick
+the *Women's Cancer Drug Evidence* project to open the workbench.
 
 ---
 
 ## 6. Using the workbench
 
-- **Cluster map** — each bubble is a multi-source claim cluster; size ∝ number of
-  claims, color = dominant verdict (supports / contradicts / partial /
-  inconclusive). Drag to pan, scroll to zoom. Click a bubble for its synthesized
-  answer and per-source verified evidence (exact quotes, statistical significance,
-  effect size, and publication date).
-- **Drug / disease filters** — highlight related bubbles, grey out the rest; the
-  drug picker is searchable.
-- **Single-paper claims tab** — search/filter the ~15k individual claims that
-  didn't converge into a multi-source cluster.
-- **Add a source by DOI** — paste a DOI; a background job resolves it (PubMed →
-  Crossref), extracts + embeds claims, and attaches them to the nearest cluster or
-  creates a new one — shown as a distinct violet-dashed bubble. If the source is
-  already in the corpus, the map pulses and pans to where it lives.
+- **Landing** — a search box (start a new review) and your existing reviews
+  (open, delete; created / last-edited shown).
+- **Building** — after a search, the map shows "Building your evidence base…"
+  while the pipeline runs. Cancel any time.
+- **Map** — drag to pan, scroll to zoom. Filter by drug / disease (cross-filtered
+  so the two agree). Click a bubble → its cited answer, verdict mix, and verified
+  per-source evidence. **Run LLM judge** scores the answer (out of 20).
+- **Ask the evidence** — the bar above the map asks the research assistant a
+  free-form question; the cited, judged answer opens in the answer panel, and
+  **History** revisits past questions.
+- **Papers / Reading list** — the side panels; toggle or drag to resize. Save
+  papers, add by DOI, and **New review from these** to start the next round from
+  your selection.
 
 ---
 
-## 7. Optional — fine-tuned model comparison
+## 7. Deploying (backend on Nebius + hosted frontend)
+
+See **[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)** for the full guide. The repo
+ships `Dockerfile`, `.dockerignore`, `frontend/Dockerfile`, `frontend/nginx.conf`.
+In short: build + push both images to the Nebius Container Registry, run them on
+Managed Kubernetes (or one VM with `docker compose`), and mount the SQLite DB on
+a volume (or port to Managed PostgreSQL + pgvector for scale). The backend needs
+**no GPU** — it only calls out to the embedding Endpoint and Token Factory.
+
+---
+
+## 8. Optional — fine-tuned model comparison
 
 The side-by-side "base vs fine-tuned" answer view needs a self-hosted vLLM serving
-the LoRA adapter. See `docs/lora_finetuning_runbook.md` for the full procedure
-(train on Token Factory → self-host on a Nebius GPU VM). Once it's reachable via an
-SSH tunnel, set `FINETUNED_BASE_URL` + `FINETUNED_MODEL` in `.env`. (This flow is
-currently kept in the backend but not wired into the UI.)
+the LoRA adapter. See `docs/lora_finetuning_runbook.md`. Set `FINETUNED_BASE_URL`
++ `FINETUNED_MODEL` in `.env` once it's reachable. (Kept in the backend, not wired
+into the UI.)
 
 ---
 
 ## Troubleshooting
 
-- **Map empty / "no clusters"** — the selected project hasn't been through the
-  pipeline. Use Option A, or run Option B.
-- **Slow first load of the map / dropdowns** — the first request warms an
-  in-process cache (a few seconds over a large corpus); later loads are instant.
-  **Restart the API after any pipeline run** so caches don't serve stale clusters.
-- **Add-by-DOI fails to resolve** — needs outbound network to NCBI/Crossref.
-  Unknown DOIs, or those without an abstract, fail with a clear message.
-- **Similarity/clustering looks wrong** — almost always an embedding-model
-  mismatch. Confirm `EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B` and `EMBEDDING_DIM=4096`.
-- **`no such column` on startup** — restart the backend; migrations run
-  automatically in the FastAPI lifespan.
+- **Map empty / "no clusters"** — the project hasn't been analyzed. Use Option A,
+  or start a search. Restart the API after a bulk pipeline run so caches don't
+  serve stale clusters.
+- **Assistant / retrieval feels slow on the demo corpus** — brute-force cosine
+  over ~27k claims takes ~25s; it's sub-second on a normal-sized project. A
+  keyword pre-filter or pgvector fixes the big-corpus case.
+- **Judge returns "not valid JSON"** — the judge is a reasoning model; ensure
+  `MAX_TOKENS_JUDGE=3072` so its `<think>` trace + JSON fit.
+- **Similarity / clustering looks wrong** — almost always an embedding-model
+  mismatch. Confirm `EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B`, `EMBEDDING_DIM=4096`.
+- **Add-by-DOI / search fails** — needs outbound network to NCBI / Crossref.
+- **Shrink a legacy database** — `python scripts/migrate_embeddings_to_blob.py --vacuum`.
 
-More detail on architecture and design decisions: `docs/SESSION_NOTES.md`,
-`docs/workbench_build_log.md`, and `CLAUDE.md`.
+More detail: `docs/SESSION_NOTES.md`, `docs/workbench_build_log.md`, `CLAUDE.md`.

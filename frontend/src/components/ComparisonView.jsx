@@ -1,5 +1,6 @@
 import { Cpu, Sparkles, WifiOff, AlertTriangle } from 'lucide-react'
 import { EvidenceItem } from './ConversationPanel'
+import CitedAnswer from './CitedAnswer'
 import LoadingSpinner from './LoadingSpinner'
 
 function AnswerCard({ icon: Icon, title, subtitle, answer, error, offline }) {
@@ -14,7 +15,7 @@ function AnswerCard({ icon: Icon, title, subtitle, answer, error, offline }) {
       </div>
       <div className="px-4 py-3 text-sm text-slate-700 leading-relaxed">
         {answer ? (
-          answer
+          <CitedAnswer text={answer} />
         ) : offline ? (
           <div className="flex items-start gap-2 text-slate-400">
             <WifiOff size={15} className="shrink-0 mt-0.5" />

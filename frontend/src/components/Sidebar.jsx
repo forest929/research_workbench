@@ -1,13 +1,13 @@
-import { NavLink, useParams, useNavigate } from 'react-router-dom'
+import { NavLink, Link, useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { fetchProjects } from '../api'
-import {
-  LayoutDashboard, FileText, FlaskConical, CheckSquare,
-  GitCompare, BarChart3, BookOpen, ChevronDown, Beaker, Search, Microscope,
-} from 'lucide-react'
+import { BookOpen, BookMarked, Microscope, Database, Plus, LayoutGrid } from 'lucide-react'
 
 const NAV = [
+  { to: 'ingest', label: 'Import & analyze', icon: Database },
+  { to: 'papers', label: 'Papers', icon: BookOpen },
   { to: '', label: 'Workbench', icon: Microscope },
+  { to: 'reading-list', label: 'Reading list', icon: BookMarked },
 ]
 
 const STATE_COLOR = {
@@ -16,124 +16,89 @@ const STATE_COLOR = {
   running: 'bg-blue-400',
   analyzing: 'bg-blue-400',
   death_spiral: 'bg-red-400',
-  onboarding: 'bg-slate-400',
-  ingesting: 'bg-purple-400',
+  onboarding: 'bg-slate-300',
+  ingesting: 'bg-violet-400',
 }
 
-export default function Sidebar({ activeProjectId, onProjectChange }) {
+const linkClass = ({ isActive }) =>
+  `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+    isActive ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+  }`
+
+export default function Sidebar({ activeProjectId }) {
   const { id: routeId } = useParams()
   const navigate = useNavigate()
+  const projectId = activeProjectId || routeId
 
   const { data: projects = [] } = useQuery({
     queryKey: ['projects'],
     queryFn: fetchProjects,
     refetchInterval: 30_000,
   })
-
-  const projectId = activeProjectId || routeId
-
-  function handleSelect(e) {
-    const pid = e.target.value
-    if (pid === '__new') {
-      navigate('/')
-      return
-    }
-    onProjectChange?.(pid)
-    navigate(`/projects/${pid}`)
-  }
+  const project = projects.find((p) => p.id === projectId)
 
   return (
-    <aside className="w-56 shrink-0 bg-navy-900 flex flex-col h-screen">
-      {/* Brand */}
-      <div className="px-4 py-5 border-b border-white/10">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-blue-500 flex items-center justify-center shrink-0">
-            <Beaker size={16} className="text-white" />
-          </div>
-          <div>
-            <p className="text-white font-semibold text-sm leading-none">Portfolio</p>
-            <p className="text-blue-300 text-xs mt-0.5">Architect AI</p>
-          </div>
-        </div>
+    <aside className="w-60 shrink-0 bg-white border-r border-slate-200 flex flex-col h-screen">
+      {/* Wordmark */}
+      <div className="px-4 h-16 flex items-center border-b border-slate-100">
+        <Link to="/" className="flex items-center gap-2.5 group">
+          <span className="h-7 w-7 rounded-md bg-slate-900 text-white grid place-items-center font-display text-sm leading-none">
+            R
+          </span>
+          <span className="font-display text-[15px] text-slate-900 leading-[1.1] group-hover:text-blue-700 transition-colors">
+            Research<br />Workbench
+          </span>
+        </Link>
       </div>
 
-      {/* Project selector */}
-      <div className="px-3 py-3 border-b border-white/10">
-        <p className="text-xs font-medium text-slate-400 mb-1.5 px-1">Active Project</p>
-        <div className="relative">
-          <select
-            value={projectId || ''}
-            onChange={handleSelect}
-            className="w-full bg-white/10 text-white text-xs py-2 pl-3 pr-7 rounded-lg
-                       border border-white/20 appearance-none cursor-pointer
-                       focus:outline-none focus:ring-2 focus:ring-blue-400
-                       hover:bg-white/15 transition-colors"
-          >
-            {!projectId && <option value="">— select project —</option>}
-            {projects.map((p) => (
-              <option key={p.id} value={p.id} className="bg-slate-800 text-white">
-                {p.name.length > 22 ? p.name.slice(0, 22) + '…' : p.name}
-              </option>
-            ))}
-            <option value="__new" className="bg-slate-800 text-blue-300">+ New project</option>
-          </select>
-          <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" />
-        </div>
-
-        {projectId && projects.length > 0 && (() => {
-          const p = projects.find((x) => x.id === projectId)
-          const dot = STATE_COLOR[p?.state] || 'bg-slate-400'
-          return p ? (
-            <div className="flex items-center gap-1.5 mt-2 px-1">
-              <div className={`w-1.5 h-1.5 rounded-full ${dot}`} />
-              <span className="text-xs text-slate-400">{p.state?.replace(/_/g, ' ')}</span>
-            </div>
-          ) : null
-        })()}
+      {/* Top actions */}
+      <div className="px-3 pt-4 pb-2 space-y-0.5">
+        <NavLink to="/" end className={linkClass}>
+          <LayoutGrid size={16} /> Projects
+        </NavLink>
+        <button
+          onClick={() => navigate('/new')}
+          className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium
+                     bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+        >
+          <Plus size={16} /> New review
+        </button>
       </div>
 
-      {/* Nav */}
+      {/* Active project + its sections */}
       {projectId && (
-        <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-          {NAV.map(({ to, label, icon: Icon }) => {
-            const href = `/projects/${projectId}${to ? `/${to}` : ''}`
-            return (
-              <NavLink
-                key={to}
-                to={href}
-                end={to === ''}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                    isActive
-                      ? 'bg-blue-600 text-white font-medium'
-                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
-                  }`
-                }
-              >
-                <Icon size={16} />
-                {label}
+        <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3">
+          <div className="px-3 pt-2 pb-3">
+            <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400 mb-1.5">Current review</p>
+            <p className="text-sm font-medium text-slate-800 leading-snug line-clamp-2">
+              {project?.name || 'Loading…'}
+            </p>
+            {project && (
+              <span className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-slate-500">
+                <span className={`w-1.5 h-1.5 rounded-full ${STATE_COLOR[project.state] || 'bg-slate-300'}`} />
+                {project.state?.replace(/_/g, ' ')}
+              </span>
+            )}
+          </div>
+          <nav className="space-y-0.5">
+            {NAV.map(({ to, label, icon: Icon }) => (
+              <NavLink key={to} to={`/projects/${projectId}${to ? `/${to}` : ''}`} end={to === ''} className={linkClass}>
+                <Icon size={16} /> {label}
               </NavLink>
-            )
-          })}
-        </nav>
+            ))}
+          </nav>
+        </div>
       )}
 
       {!projectId && (
-        <div className="flex-1 px-4 py-6">
-          <button
-            onClick={() => navigate('/')}
-            className="w-full py-2.5 rounded-lg border border-dashed border-white/20 text-slate-400
-                       text-sm hover:bg-white/5 transition-colors flex items-center justify-center gap-2"
-          >
-            <LayoutDashboard size={14} />
-            Create project
-          </button>
+        <div className="flex-1 px-4 py-6 text-sm text-slate-400 leading-relaxed">
+          Pick a review to open its workbench, or start a new one.
         </div>
       )}
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-white/10">
-        <p className="text-xs text-slate-500">Nebius AI Cloud · v0.1</p>
+      <div className="px-4 py-3 border-t border-slate-100">
+        <p className="text-[11px] text-slate-400">Nebius AI Cloud</p>
       </div>
     </aside>
   )

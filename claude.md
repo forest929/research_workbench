@@ -8,26 +8,20 @@ An AI-powered systematic review platform ("AI Portfolio Architect") — built on
 
 ## Running the project
 
+See **README.md** for full setup, environment, and the corpus-build pipeline.
+Quick start:
+
 ```bash
-# Start the FastAPI backend (from project root)
+# Backend (DB migrations auto-run on startup via the FastAPI lifespan)
 uvicorn api.main:app --reload --port 8000
 
-# Start the React frontend (new — replaces Streamlit)
+# Frontend (the React SPA is the only UI)
 cd frontend && npm run dev   # http://localhost:5173
-
-# Legacy Streamlit UI (still works but superseded)
-# streamlit run ui/app.py --server.port 8501
-
-# One-shot data ingest (then trigger analysis via UI or API)
-python scripts/ingest_global_warming.py [--max-records N] [--pubmed-only] [--no-embed]
-
-# After ingestion, trigger LLM analysis:
-#   UI:  Page 3 Research → Re-run Analysis
-#   API: curl -X POST http://localhost:8000/projects/<id>/run
-
-# Run DB migrations (auto-runs on startup via lifespan)
-python -c "import asyncio; from portfolio_architect.db.migrations import run_migrations; ..."
 ```
+
+Create a project and import documents from the app (search / file upload / DOI
+list), or rebuild the corpus with the `scripts/` pipeline (see README.md →
+"Rebuild the corpus"). The legacy Streamlit UI has been removed.
 
 ## Architecture
 
@@ -36,7 +30,7 @@ api/                       FastAPI backend
   main.py                  Lifespan: pool init + migrations
   deps.py                  get_conn() dependency (SQLite via _ConnProxy shim)
   routers/
-    projects.py / documents.py / criteria.py / screening.py
+    projects.py / ingest.py / workbench.py / reading_list.py
 
 portfolio_architect/
   agents/
@@ -59,17 +53,8 @@ portfolio_architect/
     prompt_builder.py      build_messages() for screening (criteria + few-shot + guidance)
   ranking/active_learning.py  rank_pending_documents() — pure-numpy cosine k-NN uncertainty
 
-ui/
-  app.py                   Streamlit entry point + sidebar nav
-  pages/
-    01_onboarding.py       Create project / select active project
-    02_upload.py           Upload CSV / paste text
-    03_research.py         View results, Re-run Analysis, → Screening link
-    04_steering.py         Edit/delete criteria, set Gold Values
-    05_discrepancy.py      View LLM-human disagreements
-    06_report.py           Generate / view portfolio report
-    07_screening.py        Main human validation loop (auto-predict, 2-col layout)
-  components/              Reusable card components
+frontend/                  React + Vite SPA — the only UI
+  src/pages/               Projects, Ingest (progress), Workbench, ReadingList
 
 scripts/
   ingest_global_warming.py  Data ingest ONLY — no LLM calls (analysis decoupled)
@@ -105,7 +90,7 @@ NEBIUS_LLM_MODEL=...          # Token Factory model for generation
 NEBIUS_JUDGE_MODEL=...        # ideally different model for the judge
 DATABASE_URL=sqlite:///...    # or Nebius managed PG
 NCBI_API_KEY=...              # optional; increases PubMed rate limit
-API_BASE_URL=http://localhost:8000   # used by Streamlit pages
+API_BASE_URL=http://localhost:8000   # backend URL
 ```
 
 See `.env.example` for the full list. Never commit `.env`.

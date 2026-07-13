@@ -1,10 +1,12 @@
 """Decision memory: store and retrieve human-validated screening decisions as few-shot examples."""
 
-import json
 import math
 from uuid import UUID, uuid4
 
+import numpy as np
+
 from portfolio_architect.db.pool import _ConnProxy
+from portfolio_architect.embedding import codec
 
 
 def _cosine_sim(a: list[float], b: list[float]) -> float:
@@ -24,10 +26,8 @@ async def get_doc_embedding(conn: _ConnProxy, document_id: UUID) -> list[float] 
     )
     if not rows:
         return None
-    vecs = [json.loads(r["embedding"]) for r in rows]
-    dim = len(vecs[0])
-    mean = [sum(v[i] for v in vecs) / len(vecs) for i in range(dim)]
-    return mean
+    mat = np.array([codec.decode(r["embedding"]) for r in rows], dtype=np.float32)
+    return mat.mean(axis=0).tolist()
 
 
 async def store_decision(
@@ -45,7 +45,7 @@ async def store_decision(
 ) -> dict:
     """Persist a human decision and cache the document embedding for future similarity search."""
     embedding = await get_doc_embedding(conn, document_id)
-    emb_json = json.dumps(embedding) if embedding else None
+    emb_blob = codec.encode(embedding) if embedding else None
 
     did = str(uuid4())
     row = await conn.fetchrow(
@@ -60,7 +60,7 @@ async def store_decision(
         llm_label, llm_confidence, llm_reasoning,
         human_label, human_reason, reason_code,
         1 if is_protocol_specific else 0,
-        reviewer, emb_json,
+        reviewer, emb_blob,
     )
 
     # Update the document row with human decision and cached embedding
@@ -73,7 +73,7 @@ async def store_decision(
                doc_embedding = ?
            WHERE id = ?""",
         human_label, llm_label, llm_confidence, llm_reasoning,
-        emb_json, str(document_id),
+        emb_blob, str(document_id),
     )
     return dict(row)
 
@@ -98,7 +98,7 @@ async def retrieve_similar_examples(
 
     scored = []
     for r in rows:
-        emb = json.loads(r["doc_embedding"])
+        emb = codec.decode_list(r["doc_embedding"])
         sim = _cosine_sim(query_embedding, emb)
         scored.append((sim, dict(r)))
 

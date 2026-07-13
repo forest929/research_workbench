@@ -16,11 +16,16 @@ from portfolio_architect.prompts.conversation_synthesis import (
     claims_to_xml,
 )
 
-# Cap how many member claims go into a synthesis prompt. Large generic clusters
-# (e.g. "chemotherapy", 170+ members) would otherwise produce a bloated,
-# unfocused prompt/answer and burn tokens. We keep the strongest evidence while
-# preserving any disagreement (contradicts/partially_supports are always kept).
-MAX_SYNTH_MEMBERS = 12
+# Cap how many member claims are quoted in detail in a synthesis prompt. Large
+# generic clusters (e.g. "chemotherapy", 170+ members) would otherwise produce a
+# bloated prompt/answer and burn tokens. The DETAIL is a focused subset; the
+# aggregate STATISTICS reported in the answer stay full-coverage via
+# verdict_stats() over every member, so nothing is silently dropped from the
+# counts. The subset expands the dissent (contradicts / partially_supports),
+# which is the researcher's focus, and keeps a few of the strongest supporting
+# claims for balance.
+MAX_SYNTH_MEMBERS = 16
+MIN_SUPPORT_CONTEXT = 3  # always quote at least this many majority claims, if any
 
 _DISSENT = ("contradicts", "partially_supports")
 
@@ -117,10 +122,57 @@ def rank_members(members: list[dict]) -> list[dict]:
     return dissent + agree
 
 
+def verdict_stats(members: list[dict]) -> dict:
+    """Full-coverage verdict counts over EVERY member of the cluster — the source
+    of the aggregate statistics the answer opens with (e.g. "83 of 92 support").
+    Independent of which claims are quoted in detail."""
+    counts = Counter((m.get("verdict") or "inconclusive") for m in members)
+    return {
+        "total": len(members),
+        "distinct_docs": len({m.get("source_id") for m in members if m.get("source_id")}),
+        "supports": counts.get("supports", 0),
+        "partially_supports": counts.get("partially_supports", 0),
+        "contradicts": counts.get("contradicts", 0),
+        "inconclusive": counts.get("inconclusive", 0),
+    }
+
+
+def stats_line(stats: dict) -> str:
+    """One-line, human-readable rendering of the full-cluster totals for the prompt."""
+    return (
+        f"{stats['total']} claims from {stats['distinct_docs']} studies: "
+        f"{stats['supports']} support, {stats['partially_supports']} partially support, "
+        f"{stats['contradicts']} contradict, {stats['inconclusive']} inconclusive."
+    )
+
+
 def _select_members(members: list[dict], limit: int = MAX_SYNTH_MEMBERS) -> list[dict]:
-    """Top `limit` members by the calibrated ranking (dissent-first, then
-    evidence strength). Small clusters are returned whole, still ranked."""
-    return rank_members(members)[:limit]
+    """Dissent-expanded detail set: quote as much dissenting evidence
+    (contradicts / partially_supports) as fits, then fill the remaining slots
+    with the strongest supporting/other claims for balance. Aggregate counts stay
+    full-coverage via verdict_stats(); this only picks which claims are quoted."""
+    ranked = rank_members(members)
+    dissent = [m for m in ranked if m.get("verdict") in _DISSENT]
+    other = [m for m in ranked if m.get("verdict") not in _DISSENT]
+    if not dissent:
+        return ranked[:limit]
+    keep_other = min(len(other), max(MIN_SUPPORT_CONTEXT, limit - len(dissent)))
+    keep_dissent = min(len(dissent), limit - keep_other)
+    return dissent[:keep_dissent] + other[:keep_other]
+
+
+def _synthesis_messages(question: str, members: list[dict]) -> list[dict]:
+    """Build the synthesis prompt: full-coverage totals + the dissent-expanded
+    detail subset. Shared by the batch builder and the compare path so they never
+    diverge."""
+    return [
+        {"role": "system", "content": CONVERSATION_SYNTHESIS_SYSTEM},
+        {"role": "user", "content": CONVERSATION_SYNTHESIS_USER.format(
+            question=question,
+            evidence_totals=stats_line(verdict_stats(members)),
+            claims_xml=claims_to_xml(_select_members(members)),
+        )},
+    ]
 
 
 async def build_conversation(
@@ -135,14 +187,7 @@ async def build_conversation(
     outcome = _mode([m.get("outcome") for m in members])
     question = build_question(cluster["intervention_key"], population, outcome)
 
-    selected = _select_members(members)
-    messages = [
-        {"role": "system", "content": CONVERSATION_SYNTHESIS_SYSTEM},
-        {"role": "user", "content": CONVERSATION_SYNTHESIS_USER.format(
-            question=question,
-            claims_xml=claims_to_xml(selected),
-        )},
-    ]
+    messages = _synthesis_messages(question, members)
 
     try:
         answer = await llm.generate(
@@ -176,13 +221,7 @@ async def build_conversation_compare(
     outcome = _mode([m.get("outcome") for m in members])
     question = build_question(intervention_key, population, outcome)
 
-    messages = [
-        {"role": "system", "content": CONVERSATION_SYNTHESIS_SYSTEM},
-        {"role": "user", "content": CONVERSATION_SYNTHESIS_USER.format(
-            question=question,
-            claims_xml=claims_to_xml(members),
-        )},
-    ]
+    messages = _synthesis_messages(question, members)
 
     try:
         base_answer = (await llm.generate(

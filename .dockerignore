@@ -1,0 +1,19 @@
+# Never ship these into the backend image:
+portfolio_architect.db
+portfolio_architect.db-*
+portfolio_architect.db.bak
+.env
+*.pem
+.venv
+.git
+.gitignore
+frontend
+node_modules
+data
+docs
+tests
+scripts
+__pycache__
+**/__pycache__
+*.pyc
+.DS_Store

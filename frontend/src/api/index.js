@@ -5,60 +5,31 @@ export { api }
 export const fetchProjects = () => api.get('/projects')
 export const fetchProject = (id) => api.get(`/projects/${id}`)
 export const createProject = (body) => api.post('/projects', body)
+export const deleteProject = (id) => api.delete(`/projects/${id}`)
 export const approveProject = (id) => api.post(`/projects/${id}/approve`)
 export const resolveProject = (id, resolution_guidance) =>
   api.post(`/projects/${id}/resolve`, { resolution_guidance })
-
-// Documents
-export const fetchDocuments = (projectId) => api.get(`/projects/${projectId}/documents`)
-export const ingestDocument = (projectId, body) => api.post(`/projects/${projectId}/documents`, body)
-
-// Research
-export const runAnalysis = (projectId) => api.post(`/projects/${projectId}/run`)
-export const fetchResults = (projectId) => api.get(`/projects/${projectId}/results`)
-
-// Criteria
-export const fetchCriteria = (projectId) => api.get(`/projects/${projectId}/criteria`)
-export const updateCriterion = (projectId, criterionId, body) =>
-  api.patch(`/projects/${projectId}/criteria/${criterionId}`, body)
-export const deleteCriterion = (projectId, criterionId) =>
-  api.delete(`/projects/${projectId}/criteria/${criterionId}`)
-
-// Screening
-export const fetchScreeningQueue = (projectId, limit = 30) =>
-  api.get(`/projects/${projectId}/screening/queue?limit=${limit}`)
-export const llmPredict = (projectId, docId) =>
-  api.post(`/projects/${projectId}/screening/${docId}/llm-predict`)
-export const recordDecision = (projectId, docId, body) =>
-  api.post(`/projects/${projectId}/screening/${docId}/decide`, body)
-export const fetchScreeningStats = (projectId) =>
-  api.get(`/projects/${projectId}/screening/stats`)
-export const fetchPreferences = (projectId) =>
-  api.get(`/projects/${projectId}/screening/preferences`)
 
 // Search-driven ingest
 export const triggerSearch = (projectId, body) =>
   api.post(`/projects/${projectId}/search`, body)
 export const fetchIngestStatus = (projectId) =>
   api.get(`/projects/${projectId}/ingest-status`)
-
-// Export — CSV/Excel are direct download URLs; Google Sheets is a POST
-export const exportCsvUrl   = (projectId) => `/api/projects/${projectId}/export/csv`
-export const exportExcelUrl = (projectId) => `/api/projects/${projectId}/export/excel`
-export const exportGoogleSheets = (projectId, body) =>
-  api.post(`/projects/${projectId}/export/google-sheets`, body)
-
-// Discrepancy
-export const fetchDiscrepancy = (projectId) =>
-  api.get(`/projects/${projectId}/discrepancy`)
-
-// Report
-export const fetchReport = (projectId) =>
-  api.get(`/projects/${projectId}/report`)
-
-// Artifacts
-export const fetchArtifact = (projectId) =>
-  api.get(`/projects/${projectId}/artifact`)
+export const triggerAnalyze = (projectId) =>
+  api.post(`/projects/${projectId}/analyze`)
+export const cancelBuild = (projectId) =>
+  api.post(`/projects/${projectId}/cancel`)
+export const fetchAnalyzeStatus = (projectId) =>
+  api.get(`/projects/${projectId}/analyze-status`)
+export const ingestDois = (projectId, dois) =>
+  api.post(`/projects/${projectId}/ingest-dois`, { dois })
+// Multi-file (CSV/Excel/PDF, or a whole folder) — multipart, so raw fetch.
+export const ingestFiles = (projectId, fileList) => {
+  const fd = new FormData()
+  for (const f of fileList) fd.append('files', f)
+  return fetch(`/api/projects/${projectId}/ingest-files`, { method: 'POST', body: fd })
+    .then(async (r) => { if (!r.ok) throw new Error(await r.text()); return r.json() })
+}
 
 // Workbench — claim clusters, conversations, live generation
 export const fetchClusters = (projectId, multiOnly = true) =>
@@ -67,8 +38,32 @@ export const fetchClusterDetail = (projectId, clusterId, full = false) =>
   api.get(`/projects/${projectId}/clusters/${clusterId}${full ? '?full=true' : ''}`)
 export const fetchClusterStats = (projectId) =>
   api.get(`/projects/${projectId}/clusters/stats`)
+export const judgeCluster = (projectId, clusterId) =>
+  api.post(`/projects/${projectId}/clusters/${clusterId}/judge`)
+export const saveClusterSources = (projectId, clusterId) =>
+  api.post(`/projects/${projectId}/clusters/${clusterId}/save-sources`)
 export const fetchWorkbenchOptions = (projectId) =>
   api.get(`/projects/${projectId}/workbench/options`)
+export const fetchPapers = (projectId, { q = '', limit = 50, offset = 0 } = {}) => {
+  const p = new URLSearchParams()
+  if (q) p.set('q', q)
+  p.set('limit', limit); p.set('offset', offset)
+  return api.get(`/projects/${projectId}/workbench/papers?${p.toString()}`)
+}
+export const saveFilteredPapers = (projectId, body) =>
+  api.post(`/projects/${projectId}/workbench/save-filtered`, body)
+export const fetchPaper = (projectId, sourceId) =>
+  api.get(`/projects/${projectId}/workbench/papers?source_id=${encodeURIComponent(sourceId)}&limit=1`)
+export const askAssistant = (projectId, question) =>
+  api.post(`/projects/${projectId}/workbench/assistant`, { question })
+export const fetchAssistantHistory = (projectId) =>
+  api.get(`/projects/${projectId}/workbench/assistant/history`)
+export const deleteAssistantAnswer = (projectId, id) =>
+  api.delete(`/projects/${projectId}/workbench/assistant/history/${id}`)
+export const spinoffFromReadingList = (projectId, name) =>
+  api.post(`/projects/${projectId}/reading-list/spinoff`, { name })
+export const updateDiseaseVocab = (projectId, vocab) =>
+  api.put(`/projects/${projectId}/workbench/disease-vocab`, { vocab })
 export const fetchSingleClaims = (projectId, { q = '', disease = '', verdict = '', limit = 30, offset = 0 } = {}) => {
   const p = new URLSearchParams()
   if (q) p.set('q', q)
@@ -83,3 +78,13 @@ export const addSource = (projectId, doi) =>
   api.post(`/projects/${projectId}/workbench/add-source`, { doi })
 export const fetchUserSources = (projectId) =>
   api.get(`/projects/${projectId}/workbench/user-sources`)
+
+// Reading list — a project's curated set of bookmarked publications
+export const fetchReadingList = (projectId) =>
+  api.get(`/projects/${projectId}/reading-list`)
+export const savePublication = (projectId, body) =>
+  api.post(`/projects/${projectId}/reading-list`, body)
+export const deletePublication = (projectId, sourceId) =>
+  // source_id sits in a :path segment — encode each part but keep the slashes,
+  // so ids like "doi:10.1001/jama.2020.1" route intact.
+  api.delete(`/projects/${projectId}/reading-list/${sourceId.split('/').map(encodeURIComponent).join('/')}`)

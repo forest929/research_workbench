@@ -1,291 +1,229 @@
-import { useState, useEffect, useRef } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchDocuments, triggerSearch, fetchIngestStatus } from '../api'
-import SourceLink from '../components/SourceLink'
+import { fetchIngestStatus, triggerAnalyze, fetchAnalyzeStatus } from '../api'
 import LoadingSpinner from '../components/LoadingSpinner'
-import Badge from '../components/Badge'
-import {
-  Search, Database, CheckCircle, Clock, Zap, AlertCircle,
-  BookOpen, Newspaper, ChevronDown, ChevronUp,
-} from 'lucide-react'
+import { Database, CheckCircle2, AlertCircle, ArrowRight, Loader2, FileWarning, FlaskConical, Microscope } from 'lucide-react'
 
-const SOURCES = [
-  { id: 'pubmed', label: 'PubMed', icon: BookOpen, description: 'Biomedical & life sciences abstracts' },
-  { id: 'arxiv',  label: 'arXiv',  icon: Newspaper, description: 'Physics, CS, math, biology preprints' },
-]
-
-function ProgressRing({ pct, size = 48, stroke = 4 }) {
-  const r = (size - stroke) / 2
-  const circ = 2 * Math.PI * r
-  const offset = circ - (pct / 100) * circ
-  return (
-    <svg width={size} height={size} className="-rotate-90">
-      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#e2e8f0" strokeWidth={stroke} />
-      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#2563eb" strokeWidth={stroke}
-        strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
-        style={{ transition: 'stroke-dashoffset 0.5s ease' }} />
-    </svg>
-  )
+const INGEST_ACTIVE = ['running', 'embedding']
+const ANALYZE_ACTIVE = ['running']
+const PHASE_LABEL = {
+  extracting: 'Extracting claims from documents',
+  embedding: 'Embedding claims',
+  clustering: 'Clustering claims across papers',
+  synthesizing: 'Synthesizing cited answers',
+  finalizing: 'Laying out the evidence map',
 }
 
-function LiveLog({ entries }) {
-  const endRef = useRef(null)
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [entries.length])
-  if (!entries.length) return null
+function Stat({ label, value }) {
   return (
-    <div className="bg-slate-900 rounded-xl p-4 font-mono text-xs max-h-40 overflow-y-auto space-y-0.5">
-      {entries.map((e, i) => (
-        <div key={i} className={e.type === 'error' ? 'text-red-400' : e.type === 'success' ? 'text-emerald-400' : 'text-slate-300'}>
-          <span className="text-slate-500 mr-2">{e.time}</span>{e.msg}
-        </div>
-      ))}
-      <div ref={endRef} />
+    <div className="px-3.5 py-2.5 rounded-lg bg-white border border-slate-200 text-center">
+      <p className="text-[10px] uppercase tracking-wide text-slate-400 leading-none">{label}</p>
+      <p className="text-lg font-semibold text-slate-800 mt-1 tabular-nums">{value ?? 0}</p>
     </div>
   )
 }
 
+function Bar({ pct, done }) {
+  return (
+    <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+      <div
+        className={`h-full rounded-full transition-all duration-500 ${done ? 'bg-emerald-500' : 'bg-blue-500'}`}
+        style={{ width: `${done ? 100 : pct}%` }}
+      />
+    </div>
+  )
+}
+
+/**
+ * Post-create pipeline screen: (1) ingest documents, then (2) analyze them into
+ * claims/clusters/answers. Polls both statuses and hands off to the workbench.
+ */
 export default function IngestPage() {
   const { id: projectId } = useParams()
+  const navigate = useNavigate()
   const qc = useQueryClient()
 
-  const [query, setQuery] = useState('')
-  const [sources, setSources] = useState(['pubmed', 'arxiv'])
-  const [maxRecords, setMaxRecords] = useState(200)
-  const [showDocs, setShowDocs] = useState(false)
-  const [log, setLog] = useState([])
-  const [polling, setPolling] = useState(false)
-
-  function addLog(msg, type = 'info') {
-    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    setLog((l) => [...l, { msg, type, time }])
-  }
-
-  // Live ingest status
-  const { data: status, refetch: refetchStatus } = useQuery({
-    queryKey: ['ingest-status', projectId],
+  const { data: ing } = useQuery({
+    queryKey: ['ingestStatus', projectId],
     queryFn: () => fetchIngestStatus(projectId),
-    refetchInterval: polling ? 2000 : false,
-    enabled: true,
+    refetchInterval: (q) => (INGEST_ACTIVE.includes(q.state.data?.status) ? 1500 : false),
+  })
+  const { data: ana } = useQuery({
+    queryKey: ['analyzeStatus', projectId],
+    queryFn: () => fetchAnalyzeStatus(projectId),
+    refetchInterval: (q) => (ANALYZE_ACTIVE.includes(q.state.data?.status) ? 2000 : false),
   })
 
-  // Watch for completion
-  useEffect(() => {
-    if (!status) return
-    if (status.status === 'done') {
-      setPolling(false)
-      addLog(`Done — ${status.db_total} documents, ${status.db_embedded} embedded`, 'success')
-      qc.invalidateQueries({ queryKey: ['documents', projectId] })
-    }
-    if (status.status === 'error') {
-      setPolling(false)
-      addLog(`Error: ${status.error}`, 'error')
-    }
-  }, [status?.status])
-
-  const { data: docs = [] } = useQuery({
-    queryKey: ['documents', projectId],
-    queryFn: () => fetchDocuments(projectId),
-    refetchInterval: polling ? 5000 : 30000,
+  const analyze = useMutation({
+    mutationFn: () => triggerAnalyze(projectId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['analyzeStatus', projectId] }),
   })
 
-  const { mutate: search, isPending: isStarting } = useMutation({
-    mutationFn: () => triggerSearch(projectId, { query, sources, max_records: maxRecords }),
-    onSuccess: () => {
-      setLog([])
-      addLog(`Starting search: "${query}" on ${sources.join(', ')}…`)
-      setPolling(true)
-    },
-    onError: (e) => addLog(`Failed to start: ${e.message}`, 'error'),
-  })
+  const iStatus = ing?.status || 'idle'
+  const iActive = INGEST_ACTIVE.includes(iStatus)
+  const iTotal = ing?.total || 0
+  const iDone = iStatus === 'embedding' ? ing?.embedded : ing?.ingested
+  const iPct = iTotal ? Math.min(100, Math.round(((iDone || 0) / iTotal) * 100)) : (iActive ? 5 : 0)
+  const ingestDone = iStatus === 'done'
 
-  const isRunning = status?.status === 'running' || status?.status === 'embedding' || polling
-  const dbTotal   = status?.db_total   ?? docs.length
-  const dbEmb     = status?.db_embedded ?? docs.filter((d) => d.embedded).length
-  const dbPending = status?.db_pending  ?? docs.filter((d) => !d.embedded).length
-  const progress  = dbTotal > 0 ? Math.round((dbEmb / dbTotal) * 100) : 0
+  const aStatus = ana?.status || 'idle'
+  const aActive = ANALYZE_ACTIVE.includes(aStatus)
+  const aPhase = ana?.phase
+  const aPct =
+    aStatus === 'done' ? 100
+      : aPhase === 'extracting' && ana?.docs_total ? Math.round((ana.docs_done / ana.docs_total) * 100)
+      : aPhase === 'synthesizing' && ana?.conversations_total ? Math.round((ana.conversations_done / ana.conversations_total) * 100)
+      : aActive ? 60 : 0
 
-  function toggleSource(id) {
-    setSources((s) => s.includes(id) ? s.filter((x) => x !== id) : [...s, id])
-  }
+  const workbench = () => navigate(`/projects/${projectId}`)
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Header */}
-      <div className="px-6 py-4 border-b border-slate-200 bg-white shrink-0">
-        <h1 className="text-lg font-semibold text-slate-900">Literature Search</h1>
-        <p className="text-sm text-slate-500">
-          Search PubMed and arXiv to populate your corpus — the system fetches, chunks, and embeds papers in the background.
-        </p>
-      </div>
+    <div className="h-full overflow-y-auto bg-slate-50">
+      <div className="max-w-xl mx-auto px-6 py-10 space-y-6">
 
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-3xl mx-auto px-6 py-6 space-y-5">
-
-          {/* Search form */}
-          <div className="card p-5 space-y-4">
-            <div>
-              <label className="label">Search query</label>
-              <div className="relative">
-                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                  className="input pl-9 text-base"
-                  placeholder="e.g. carbapenem resistant bacteria, climate change adaptation…"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && !isRunning && query.trim() && search()}
-                />
-              </div>
+        {/* ── Step 1: ingest ── */}
+        <section>
+          <div className="flex items-center gap-2 mb-3">
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${ingestDone ? 'bg-emerald-100' : iStatus === 'error' ? 'bg-amber-100' : 'bg-blue-100'}`}>
+              {ingestDone ? <CheckCircle2 size={18} className="text-emerald-600" />
+                : iStatus === 'error' ? <AlertCircle size={18} className="text-amber-600" />
+                : <Database size={17} className="text-blue-600" />}
             </div>
-
-            {/* Sources */}
             <div>
-              <label className="label mb-2 block">Sources</label>
-              <div className="flex gap-3">
-                {SOURCES.map(({ id, label, icon: Icon, description }) => (
-                  <button
-                    key={id}
-                    onClick={() => toggleSource(id)}
-                    className={`flex-1 flex items-center gap-3 px-4 py-3 rounded-xl border-2 text-left transition-all
-                      ${sources.includes(id)
-                        ? 'border-blue-500 bg-blue-50 text-blue-800'
-                        : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'}`}
-                  >
-                    <Icon size={18} className={sources.includes(id) ? 'text-blue-500' : 'text-slate-400'} />
-                    <div>
-                      <p className="font-semibold text-sm">{label}</p>
-                      <p className="text-xs opacity-70">{description}</p>
-                    </div>
-                    {sources.includes(id) && (
-                      <CheckCircle size={14} className="ml-auto text-blue-500 shrink-0" />
-                    )}
-                  </button>
-                ))}
-              </div>
+              <h2 className="text-sm font-semibold text-slate-800 leading-none">1 · Import documents</h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {ingestDone ? `${ing?.db_total || 0} documents in this project`
+                  : iStatus === 'error' ? (ing?.error || 'Import problem')
+                  : iStatus === 'idle' ? 'No import running'
+                  : 'Importing…'}
+              </p>
             </div>
-
-            {/* Max records */}
-            <div>
-              <div className="flex justify-between mb-1">
-                <label className="label mb-0">Max records</label>
-                <span className="text-sm font-medium text-slate-700">{maxRecords}</span>
-              </div>
-              <input
-                type="range" min={50} max={2000} step={50}
-                value={maxRecords}
-                onChange={(e) => setMaxRecords(Number(e.target.value))}
-                className="w-full accent-blue-600"
-              />
-              <div className="flex justify-between text-xs text-slate-400 mt-0.5">
-                <span>50 — quick test</span>
-                <span>2000 — full sweep</span>
-              </div>
-            </div>
-
-            <button
-              className="btn-primary w-full justify-center py-2.5"
-              onClick={() => search()}
-              disabled={isRunning || isStarting || !query.trim() || sources.length === 0}
-            >
-              {isRunning ? (
-                <><LoadingSpinner size="sm" /> Ingesting…</>
-              ) : (
-                <><Zap size={15} /> Fetch &amp; Embed Papers</>
-              )}
-            </button>
           </div>
-
-          {/* Live progress */}
-          {(isRunning || status?.status === 'done' || status?.status === 'error') && (
-            <div className="card p-5 space-y-4">
-              <div className="flex items-center gap-4">
-                <div className="relative">
-                  <ProgressRing pct={progress} />
-                  <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-slate-700">
-                    {progress}%
+          {(iActive || ingestDone) && (
+            <div className="mb-3">
+              <div className="flex justify-between text-xs text-slate-500 mb-1">
+                <span className="flex items-center gap-1.5">
+                  {iActive && <Loader2 size={12} className="animate-spin text-blue-500" />}
+                  {ingestDone ? 'Complete' : (iStatus === 'embedding' ? 'Embedding…' : 'Ingesting…')}
+                </span>
+                <span className="tabular-nums">{iPct}%</span>
+              </div>
+              <Bar pct={iPct} done={ingestDone} />
+            </div>
+          )}
+          <div className="grid grid-cols-3 gap-2">
+            <Stat label="Fetched" value={ing?.fetched} />
+            <Stat label="Ingested" value={ing?.ingested} />
+            <Stat label="Documents" value={ing?.db_total} />
+          </div>
+          {ing?.skipped?.length > 0 && (
+            <div className="mt-3 flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <FileWarning size={14} className="shrink-0 mt-0.5" />
+              <span>Skipped {ing.skipped.length} file(s) with no extractable content.</span>
+            </div>
+          )}
+          {/* Per-DOI resolution report — which DOIs resolved and which were skipped, and why */}
+          {ing?.results?.length > 0 && (() => {
+            const REASON = {
+              no_abstract: 'resolved but no abstract to ingest',
+              unresolved: 'not found on PubMed or Crossref',
+              duplicate: 'duplicate of another source',
+            }
+            const resolved = ing.results.filter((r) => r.status === 'resolved')
+            const skipped = ing.results.filter((r) => r.status !== 'resolved')
+            return (
+              <div className="mt-3 text-xs">
+                <div className="flex items-center gap-1.5 text-slate-600 mb-1.5">
+                  <CheckCircle2 size={13} className="text-emerald-600 shrink-0" />
+                  <span>
+                    {resolved.length} of {ing.results.length} DOIs resolved
+                    {skipped.length > 0 ? `, ${skipped.length} skipped` : ''}
                   </span>
                 </div>
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    {isRunning && <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />}
-                    {status?.status === 'done' && <CheckCircle size={14} className="text-emerald-500" />}
-                    {status?.status === 'error' && <AlertCircle size={14} className="text-red-500" />}
-                    <span className="text-sm font-medium text-slate-800 capitalize">
-                      {status?.status === 'embedding' ? 'Embedding…' :
-                       status?.status === 'done'      ? 'Complete' :
-                       status?.status === 'error'     ? 'Failed' :
-                       status?.status === 'running'   ? 'Fetching papers…' : 'Idle'}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-3 text-center">
-                    {[
-                      { label: 'Fetched', value: status?.fetched ?? 0 },
-                      { label: 'Ingested', value: dbTotal },
-                      { label: 'Embedded', value: dbEmb },
-                    ].map(({ label, value }) => (
-                      <div key={label} className="bg-slate-50 rounded-lg py-2">
-                        <p className="text-lg font-bold text-slate-900">{value}</p>
-                        <p className="text-xs text-slate-500">{label}</p>
-                      </div>
+                {skipped.length > 0 && (
+                  <ul className="space-y-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                    {skipped.map((r) => (
+                      <li key={r.doi} className="flex items-start gap-1.5 text-amber-800">
+                        <AlertCircle size={12} className="shrink-0 mt-0.5" />
+                        <span className="font-mono break-all">{r.doi}</span>
+                        <span className="text-amber-600 whitespace-nowrap">— {REASON[r.status] || r.status}</span>
+                      </li>
                     ))}
-                  </div>
-                </div>
+                  </ul>
+                )}
               </div>
+            )
+          })()}
+        </section>
 
-              <div className="bg-slate-100 rounded-full h-1.5">
-                <div className="bg-blue-500 h-1.5 rounded-full transition-all duration-500"
-                  style={{ width: `${progress}%` }} />
+        {/* ── Step 2: analyze ── */}
+        <section className={`rounded-xl border p-4 ${ingestDone || aStatus !== 'idle' ? 'border-slate-200 bg-white' : 'border-dashed border-slate-200 bg-slate-50 opacity-70'}`}>
+          <div className="flex items-center gap-2 mb-3">
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${aStatus === 'done' ? 'bg-emerald-100' : aStatus === 'error' ? 'bg-amber-100' : 'bg-violet-100'}`}>
+              {aStatus === 'done' ? <CheckCircle2 size={18} className="text-emerald-600" />
+                : aStatus === 'error' ? <AlertCircle size={18} className="text-amber-600" />
+                : <FlaskConical size={17} className="text-violet-600" />}
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-slate-800 leading-none">2 · Analyze into evidence</h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {aStatus === 'done' ? `${ana?.db_clusters || 0} clusters · ${ana?.db_answered || 0} answers`
+                  : aStatus === 'error' ? (ana?.error || 'Analysis problem')
+                  : aActive ? (PHASE_LABEL[aPhase] || 'Analyzing…')
+                  : 'Extract claims → cluster → synthesize cited answers'}
+              </p>
+            </div>
+          </div>
+
+          {aActive && (
+            <>
+              <div className="mb-3">
+                <div className="flex justify-between text-xs text-slate-500 mb-1">
+                  <span className="flex items-center gap-1.5"><Loader2 size={12} className="animate-spin text-violet-500" /> {PHASE_LABEL[aPhase] || 'Working…'}</span>
+                  <span className="tabular-nums">{aPct}%</span>
+                </div>
+                <Bar pct={aPct} />
               </div>
-
-              <LiveLog entries={log} />
-            </div>
+              <div className="grid grid-cols-4 gap-2">
+                <Stat label="Docs" value={`${ana?.docs_done ?? 0}/${ana?.docs_total ?? 0}`} />
+                <Stat label="Claims" value={ana?.claims_extracted} />
+                <Stat label="Clusters" value={ana?.clusters_built} />
+                <Stat label="Answers" value={`${ana?.conversations_done ?? 0}/${ana?.conversations_total ?? 0}`} />
+              </div>
+            </>
           )}
 
-          {/* Corpus summary */}
-          {dbTotal > 0 && (
-            <div className="card p-4">
-              <button
-                className="w-full flex items-center justify-between text-sm font-medium text-slate-700"
-                onClick={() => setShowDocs((o) => !o)}
-              >
-                <div className="flex items-center gap-2">
-                  <Database size={15} className="text-slate-400" />
-                  Corpus — {dbTotal} documents
-                  <Badge color={dbPending > 0 ? 'amber' : 'green'}>
-                    {dbPending > 0 ? `${dbPending} pending embed` : 'all embedded'}
-                  </Badge>
-                </div>
-                {showDocs ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-              </button>
-
-              {showDocs && (
-                <div className="mt-3 border-t border-slate-100 pt-3 space-y-1.5 max-h-80 overflow-y-auto">
-                  {docs.map((doc) => (
-                    <div key={doc.id} className="flex items-center gap-3 py-1.5">
-                      <div className="shrink-0">
-                        {doc.embedded
-                          ? <CheckCircle size={14} className="text-emerald-500" />
-                          : <Clock size={14} className="text-amber-400 animate-pulse" />}
-                      </div>
-                      <SourceLink id={doc.source_id} short />
-                      <Badge color="slate">{doc.doc_type}</Badge>
-                      {doc.embedded && (
-                        <span className="text-xs text-slate-400 ml-auto">{doc.chunk_count} chunks</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+          {/* Trigger button — enabled once documents exist and analysis isn't running */}
+          {!aActive && aStatus !== 'done' && (
+            <button
+              onClick={() => analyze.mutate()}
+              disabled={!ingestDone || analyze.isPending}
+              className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg bg-violet-600 text-white
+                         text-sm font-medium hover:bg-violet-700 disabled:opacity-50 transition-colors"
+            >
+              {analyze.isPending ? <Loader2 size={15} className="animate-spin" /> : <FlaskConical size={15} />}
+              {aStatus === 'error' ? 'Retry analysis' : 'Run analysis'}
+            </button>
           )}
-
-          {dbTotal === 0 && !isRunning && (
-            <div className="text-center py-10 text-slate-400">
-              <Search size={36} className="mx-auto mb-3 opacity-30" />
-              <p className="font-medium">No documents yet</p>
-              <p className="text-sm mt-1">Enter a search term above to fetch papers from PubMed and arXiv</p>
-            </div>
+          {!ingestDone && aStatus === 'idle' && (
+            <p className="text-center text-[11px] text-slate-400 mt-2">Waiting for import to finish…</p>
           )}
+          <p className="text-[11px] text-slate-400 mt-2 text-center">
+            Makes LLM + embedding calls — needs a valid <code className="bg-slate-100 px-1 rounded">NEBIUS_KEY</code> and embedding endpoint.
+          </p>
+        </section>
+
+        {/* ── Continue ── */}
+        <div className="flex justify-center">
+          <button
+            onClick={workbench}
+            className={`inline-flex items-center gap-1.5 px-5 py-2.5 rounded-lg text-sm font-medium ${
+              aStatus === 'done' ? 'bg-blue-600 text-white hover:bg-blue-700' : 'border border-slate-300 text-slate-600 hover:bg-white'
+            }`}
+          >
+            <Microscope size={15} /> {aStatus === 'done' ? 'Open workbench' : 'Go to workbench'}
+            <ArrowRight size={15} />
+          </button>
         </div>
       </div>
     </div>

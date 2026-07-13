@@ -11,7 +11,6 @@ Usage:
 
 import argparse
 import asyncio
-import json
 import sys
 from pathlib import Path
 from uuid import UUID
@@ -22,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from portfolio_architect.db.pool import create_pool, close_pool
+from portfolio_architect.embedding import codec
 from portfolio_architect.embedding.client import embed_batch
 
 BATCH_SIZE = 64
@@ -53,7 +53,7 @@ async def main(args) -> None:
             for row, emb in zip(batch, embeddings):
                 await conn.execute(
                     "UPDATE claims SET claim_embedding = ? WHERE id = ?",
-                    json.dumps(emb), row["id"],
+                    codec.encode(emb), row["id"],
                 )
 
         total += len(batch)

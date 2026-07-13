@@ -1,9 +1,9 @@
 """Workstream: select representative prototype samples via lightweight k-means clustering."""
 
-import json
 import math
 from uuid import UUID
 
+from portfolio_architect.embedding import codec
 from portfolio_architect.retrieval.hybrid_search import search_chunks
 
 
@@ -73,7 +73,7 @@ async def run(
     embedding_map: dict = {}
     for row in rows:
         if row["embedding"]:
-            embedding_map[row["id"]] = json.loads(row["embedding"])
+            embedding_map[row["id"]] = codec.decode_list(row["embedding"])
 
     chunks_with_emb = [c for c in chunks if c["chunk_id"] in embedding_map]
     if not chunks_with_emb:

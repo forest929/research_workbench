@@ -1,4 +1,8 @@
-const BASE = '/api'
+// Same-origin "/api" by default (works with the Vite dev proxy and the nginx
+// prod proxy). Set VITE_API_URL at build time to point directly at the backend
+// when the frontend is hosted separately (e.g. on object storage). In that case
+// the backend serves routes at root, so use its base URL with no "/api".
+const BASE = import.meta.env.VITE_API_URL || '/api'
 
 async function request(method, path, body) {
   const opts = {

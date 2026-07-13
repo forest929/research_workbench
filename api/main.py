@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from portfolio_architect.db.pool import create_pool, close_pool
 from portfolio_architect.db.migrations import run_migrations
-from api.routers import projects, documents, research, criteria, artifacts, discrepancy, screening, ingest, export, workbench
+from api.routers import projects, ingest, workbench, reading_list
 
 
 @asynccontextmanager
@@ -37,15 +37,9 @@ app.add_middleware(
 )
 
 app.include_router(projects.router)
-app.include_router(documents.router)
-app.include_router(research.router)
-app.include_router(criteria.router)
-app.include_router(artifacts.router)
-app.include_router(discrepancy.router)
-app.include_router(screening.router)
 app.include_router(ingest.router)
-app.include_router(export.router)
 app.include_router(workbench.router)
+app.include_router(reading_list.router)
 
 
 @app.get("/health")

@@ -12,9 +12,9 @@ function StatusChip({ s, onLocate }) {
   const color = active ? 'text-blue-600' : failed ? 'text-amber-600' : 'text-emerald-600'
   const canLocate = (s.status === 'existing' || s.status === 'done') && s.cluster_ids?.length > 0
   return (
-    <div className="flex items-center gap-1.5 text-xs">
+    <div className="flex flex-wrap items-center gap-1.5 text-xs min-w-0">
       <Icon size={13} className={`${color} ${active ? 'animate-spin' : ''} shrink-0`} />
-      <span className="text-slate-600 truncate max-w-[260px]" title={s.title || s.doi}>
+      <span className="text-slate-600 truncate max-w-full" title={s.title || s.doi}>
         {s.title || s.doi}
       </span>
       <span className={`${color} shrink-0`}>{s.message}</span>
@@ -78,22 +78,22 @@ export default function AddSourceBar({ projectId, onLocate }) {
   const latest = sources[0]
 
   return (
-    <div className="flex items-center gap-3 flex-wrap">
-      <form onSubmit={submit} className="flex items-center gap-2">
-        <div className="relative">
+    <div className="flex flex-col gap-2 min-w-0">
+      <form onSubmit={submit} className="flex items-center gap-2 w-full">
+        <div className="relative flex-1 min-w-0">
           <FlaskConical size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-violet-400" />
           <input
             value={doi}
             onChange={(e) => setDoi(e.target.value)}
-            placeholder="Add a source by DOI (e.g. 10.1056/NEJMoa2203690)"
-            className="w-[340px] pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 bg-slate-50
+            placeholder="Add a source by DOI"
+            className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 bg-slate-50
                        focus:outline-none focus:ring-2 focus:ring-violet-400 focus:bg-white"
           />
         </div>
         <button
           type="submit"
           disabled={add.isPending || !doi.trim()}
-          className="px-3 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium
+          className="shrink-0 px-3 py-2 rounded-lg bg-violet-600 text-white text-sm font-medium
                      hover:bg-violet-700 disabled:opacity-50 flex items-center gap-1.5"
         >
           <Plus size={14} /> Add
