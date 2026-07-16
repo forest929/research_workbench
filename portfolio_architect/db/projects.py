@@ -1,6 +1,6 @@
 from uuid import UUID, uuid4
 
-from portfolio_architect.db.pool import _ConnProxy
+from portfolio_architect.db.pool import _ConnProxy, is_postgres
 
 
 async def insert_project(conn: _ConnProxy, name: str, description: str, scope_statement: str) -> dict:
@@ -63,7 +63,10 @@ async def delete_project(conn: _ConnProxy, project_id: UUID | str) -> None:
 
     chunks_fts is an FTS5 virtual table with no foreign key, so the cascade never
     reaches it — we purge its rows explicitly by project_id (a single FTS scan,
-    versus a per-chunk scan a trigger would cost) to avoid orphaning search rows."""
+    versus a per-chunk scan a trigger would cost) to avoid orphaning search rows.
+    On Postgres full-text search is a generated column on chunks, which the
+    cascade removes with its row, so there is nothing extra to purge."""
     pid = str(project_id)
-    await conn.execute("DELETE FROM chunks_fts WHERE project_id = ?", pid)
+    if not is_postgres():
+        await conn.execute("DELETE FROM chunks_fts WHERE project_id = ?", pid)
     await conn.execute("DELETE FROM projects WHERE id = ?", pid)

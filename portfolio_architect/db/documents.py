@@ -1,6 +1,6 @@
 from uuid import UUID, uuid4
 
-from portfolio_architect.db.pool import _ConnProxy
+from portfolio_architect.db.pool import _ConnProxy, is_postgres
 from portfolio_architect.embedding import codec
 
 _META_FIELDS = ("Title", "Authors", "Journal", "Year", "DOI")
@@ -59,14 +59,24 @@ async def insert_chunks(
     pid = str(project_id)
     chunk_ids = [str(uuid4()) for _ in chunks]
 
-    await conn.executemany(
-        "INSERT OR IGNORE INTO chunks (id, document_id, project_id, chunk_index, content) VALUES (?, ?, ?, ?, ?)",
-        [(chunk_ids[i], did, pid, i, c) for i, c in enumerate(chunks)],
-    )
-    await conn.executemany(
-        "INSERT OR IGNORE INTO chunks_fts (chunk_id, project_id, content) VALUES (?, ?, ?)",
-        [(chunk_ids[i], pid, c) for i, c in enumerate(chunks)],
-    )
+    if is_postgres():
+        # Postgres: ON CONFLICT DO NOTHING is the upsert-ignore form. Full-text
+        # search rides on chunks.content_tsv (a generated column), so there is no
+        # separate chunks_fts table to populate.
+        await conn.executemany(
+            "INSERT INTO chunks (id, document_id, project_id, chunk_index, content) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+            [(chunk_ids[i], did, pid, i, c) for i, c in enumerate(chunks)],
+        )
+    else:
+        await conn.executemany(
+            "INSERT OR IGNORE INTO chunks (id, document_id, project_id, chunk_index, content) VALUES (?, ?, ?, ?, ?)",
+            [(chunk_ids[i], did, pid, i, c) for i, c in enumerate(chunks)],
+        )
+        await conn.executemany(
+            "INSERT OR IGNORE INTO chunks_fts (chunk_id, project_id, content) VALUES (?, ?, ?)",
+            [(chunk_ids[i], pid, c) for i, c in enumerate(chunks)],
+        )
     return [{"id": chunk_ids[i], "chunk_index": i, "content": c} for i, c in enumerate(chunks)]
 
 

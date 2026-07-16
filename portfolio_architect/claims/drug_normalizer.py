@@ -120,10 +120,18 @@ async def build_canonical_map(conn: _ConnProxy, raw_keys, project_id=None) -> di
                 # Lowercase the canonical so it matches the existing lowercase
                 # intervention_key convention and blocks consistently across batches.
                 canon = mapping[raw].strip().lower() or raw
-                await conn.execute(
-                    "INSERT OR REPLACE INTO drug_aliases (raw_key, canonical) VALUES (?, ?)",
-                    raw, canon,
-                )
+                from portfolio_architect.db.pool import is_postgres
+                if is_postgres():
+                    await conn.execute(
+                        "INSERT INTO drug_aliases (raw_key, canonical) VALUES (?, ?) "
+                        "ON CONFLICT (raw_key) DO UPDATE SET canonical = EXCLUDED.canonical",
+                        raw, canon,
+                    )
+                else:
+                    await conn.execute(
+                        "INSERT OR REPLACE INTO drug_aliases (raw_key, canonical) VALUES (?, ?)",
+                        raw, canon,
+                    )
                 cached[raw] = canon
 
     return {k: cached.get(k, k) for k in keys}

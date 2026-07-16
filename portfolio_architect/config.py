@@ -19,7 +19,6 @@ class Settings(BaseSettings):
 
     # Self-hosted fine-tuned LoRA adapter (vLLM), reached via SSH tunnel.
     # Empty when the GPU VM is down — the workbench then degrades to base-only.
-    # See docs/lora_finetuning_runbook.md §4.
     finetuned_base_url: str = ""     # e.g. http://127.0.0.1:8000/v1/
     finetuned_model: str = ""        # the vLLM --lora-modules adapter name
     finetuned_api_key: str = "EMPTY"  # vLLM ignores it but the client requires a value
@@ -30,8 +29,31 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"
     embedding_dim: int = 1024
 
-    # Database (SQLite file path)
+    # Database. Two backends, selected by DATABASE_URL:
+    #   - empty / "sqlite:///..."         → SQLite (aiosqlite), the local-dev default
+    #   - "postgresql://user:pass@host/db" → Managed PostgreSQL (asyncpg + pgvector)
+    # SQLite still uses `database_path`; Postgres uses `database_url`.
     database_path: str = "portfolio_architect.db"
+    database_url: str = ""
+    # asyncpg pool sizing (Postgres only). With Postgres you can run multiple
+    # uvicorn workers/replicas; each process opens its own pool of this size.
+    pg_pool_min_size: int = 1
+    pg_pool_max_size: int = 10
+
+    @property
+    def db_backend(self) -> str:
+        url = self.database_url.strip()
+        if url.startswith(("postgresql://", "postgres://")):
+            return "postgres"
+        return "sqlite"
+
+    @property
+    def sqlite_path(self) -> str:
+        """SQLite file path, tolerating a `sqlite:///path` DATABASE_URL form."""
+        url = self.database_url.strip()
+        if url.startswith("sqlite:///"):
+            return url[len("sqlite:///"):]
+        return self.database_path
 
     # Application
     api_base_url: str = "http://localhost:8000"
@@ -52,4 +74,8 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    # If NEBIUS_SECRET_ID is set, pull runtime config from Nebius MysteryBox into
+    # the environment first; a no-op otherwise (local dev keeps using .env).
+    from portfolio_architect.secrets import load_secrets_into_env
+    load_secrets_into_env()
     return Settings()

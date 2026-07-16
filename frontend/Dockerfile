@@ -6,6 +6,10 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
+# Point the SPA directly at the backend endpoint at build time. Empty (default)
+# falls back to same-origin "/api" for the nginx-proxy deployment.
+ARG VITE_API_URL=""
+ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build
 
 FROM nginx:alpine

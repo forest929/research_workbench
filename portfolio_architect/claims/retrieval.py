@@ -16,7 +16,7 @@ from uuid import UUID
 
 import numpy as np
 
-from portfolio_architect.db.pool import _ConnProxy
+from portfolio_architect.db.pool import _ConnProxy, is_postgres
 from portfolio_architect.embedding import codec
 from portfolio_architect.embedding import client as embedding
 
@@ -31,6 +31,9 @@ async def retrieve_claims_for_topic(
     `topic`, each annotated with a cosine `score`. Empty list if the project has
     no embedded claims. Raises ValueError if the query embedding dimension does
     not match the stored claim embeddings."""
+    if is_postgres():
+        return await _retrieve_claims_pg(conn, project_id, topic, top_k)
+
     rows = await conn.fetch(
         """
         SELECT c.*, d.source_id, d.doc_type
@@ -64,6 +67,39 @@ async def retrieve_claims_for_topic(
         r = dict(rows[int(i)])
         r["score"] = float(sims[int(i)])
         r.pop("claim_embedding", None)  # large; not needed downstream
+        r.pop("raw_llm_response", None)
+        results.append(r)
+    return results
+
+
+async def _retrieve_claims_pg(
+    conn,
+    project_id: UUID,
+    topic: str,
+    top_k: int,
+) -> list[dict]:
+    """Postgres path: pgvector computes cosine distance in-DB and returns only the
+    top_k rows (with source_id/doc_type joined), so we never pull thousands of
+    4096-dim vectors over the wire. `1 - (embedding <=> q)` recovers cosine
+    similarity to keep the returned `score` identical in meaning to the numpy path.
+    """
+    q_emb = codec.encode(await embedding.embed_text(topic))  # ndarray → pgvector param
+    rows = await conn.fetch(
+        """
+        SELECT c.*, d.source_id, d.doc_type,
+               1 - (c.claim_embedding <=> ?) AS score
+        FROM claims c JOIN documents d ON c.document_id = d.id
+        WHERE c.project_id = ? AND c.claim_embedding IS NOT NULL
+        ORDER BY c.claim_embedding <=> ?
+        LIMIT ?
+        """,
+        q_emb, str(project_id), q_emb, top_k,
+    )
+    results = []
+    for row in rows:
+        r = dict(row)
+        r["score"] = float(r["score"])
+        r.pop("claim_embedding", None)
         r.pop("raw_llm_response", None)
         results.append(r)
     return results

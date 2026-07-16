@@ -18,18 +18,35 @@ import numpy as np
 _DTYPE = "<f4"  # little-endian float32 — stable across the x86/ARM hosts we run on
 
 
-def encode(vec) -> bytes:
-    """Pack a vector (list or ndarray) as little-endian float32 bytes."""
-    return np.asarray(vec, dtype=_DTYPE).tobytes()
+def encode(vec):
+    """Encode a vector for storage in the active backend's embedding column.
+
+    - **SQLite:** packed little-endian float32 `bytes` (kept as a BLOB in the
+      TEXT-affinity `embedding` column).
+    - **Postgres:** a float32 `ndarray` — the column is `pgvector.vector` and the
+      registered pgvector codec serializes the array. This keeps every call site
+      (`codec.encode(vec)`) backend-agnostic.
+    """
+    arr = np.asarray(vec, dtype=_DTYPE)
+    from portfolio_architect.config import get_settings
+
+    if get_settings().db_backend == "postgres":
+        return arr
+    return arr.tobytes()
 
 
 def decode(blob) -> np.ndarray | None:
-    """Decode a stored embedding to a float32 ndarray. Accepts new float32
-    bytes, legacy JSON text, or None (→ None)."""
+    """Decode a stored embedding to a float32 ndarray. Accepts float32 bytes
+    (SQLite BLOB), an ndarray/list (Postgres pgvector read), legacy JSON text, or
+    None (→ None)."""
     if blob is None:
         return None
+    if isinstance(blob, np.ndarray):
+        return blob.astype(_DTYPE, copy=False)
     if isinstance(blob, (bytes, bytearray, memoryview)):
         return np.frombuffer(bytes(blob), dtype=_DTYPE)
+    if isinstance(blob, (list, tuple)):
+        return np.asarray(blob, dtype=np.float32)
     return np.asarray(json.loads(blob), dtype=np.float32)  # legacy JSON text
 
 

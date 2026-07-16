@@ -1,6 +1,10 @@
 import { api } from './client'
 export { api }
 
+// Same base resolution as the api client, for the raw multipart fetch below:
+// VITE_API_URL (backend root, hosted separately) or same-origin "/api" (proxy).
+const API_BASE = import.meta.env.VITE_API_URL || '/api'
+
 // Projects
 export const fetchProjects = () => api.get('/projects')
 export const fetchProject = (id) => api.get(`/projects/${id}`)
@@ -27,7 +31,7 @@ export const ingestDois = (projectId, dois) =>
 export const ingestFiles = (projectId, fileList) => {
   const fd = new FormData()
   for (const f of fileList) fd.append('files', f)
-  return fetch(`/api/projects/${projectId}/ingest-files`, { method: 'POST', body: fd })
+  return fetch(`${API_BASE}/projects/${projectId}/ingest-files`, { method: 'POST', body: fd })
     .then(async (r) => { if (!r.ok) throw new Error(await r.text()); return r.json() })
 }
 

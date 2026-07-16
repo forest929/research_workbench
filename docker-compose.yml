@@ -1,0 +1,50 @@
+# AI Portfolio Architect — backend + frontend on one host (Nebius VM demo path).
+#
+# The frontend (nginx) serves the SPA and reverse-proxies /api/ -> backend:8000,
+# so everything is one origin (no CORS). Config/secrets come from .env via
+# `env_file` (compose handles quoted values correctly, unlike `docker run
+# --env-file`). No secrets live in this file or in the images.
+#
+#   docker compose pull && docker compose up -d      # pull from registry + run
+#   docker compose logs -f backend                   # tail
+#   docker compose down                              # stop
+#
+# See docs/DEPLOY_COMPOSE.md for the full runbook.
+
+services:
+  backend:
+    # Service name MUST stay "backend" — frontend/nginx.conf proxies to backend:8000.
+    image: cr.eu-north1.nebius.cloud/e00w7q82b9v8scd5nr/amr-backend:latest
+    # For local build instead of pulling, uncomment:
+    # build: .
+    env_file: .env            # DATABASE_URL, EMBEDDING_DIM, NEBIUS_KEY, NEBIUS_EMBEDDING_URL, ...
+    expose:
+      - "8000"                # internal-only; the frontend reaches it over the compose network
+    ports:
+      - "8000:8000"           # OPTIONAL: publish for direct API/debug access; remove to keep it private
+    healthcheck:
+      # python is in the image (python:3.12-slim); curl is not.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    image: cr.eu-north1.nebius.cloud/e00w7q82b9v8scd5nr/amr-frontend:latest
+    # For local build instead of pulling, uncomment:
+    # build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:80"               # public entry point; use "8080:80" if port 80 is taken
+    healthcheck:
+      # busybox wget ships in nginx:alpine.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped

@@ -1,6 +1,15 @@
-"""Idempotent CREATE TABLE / CREATE INDEX statements for SQLite. Safe to re-run."""
+"""Idempotent CREATE TABLE / CREATE INDEX statements. Safe to re-run.
 
-from portfolio_architect.db.pool import _Pool
+The DDL below is authored in SQLite dialect. When the active backend is Postgres
+it is translated on the fly by `_to_pg_ddl` (embedding TEXT columns → pgvector
+`vector(dim)`, the FTS5 virtual table replaced by a generated `tsvector` column +
+GIN index), and `datetime('now')` defaults are handled by the pool's proxy.
+"""
+
+import re
+
+from portfolio_architect.config import get_settings
+from portfolio_architect.db.pool import is_postgres
 
 # New columns added to existing tables via ALTER TABLE (errors are silently ignored on re-run)
 ALTER_STATEMENTS = [
@@ -320,32 +329,89 @@ DDL_STATEMENTS = [
 ]
 
 
-async def run_migrations(pool: _Pool, create_vector_index: bool = False) -> None:
+def _to_pg_ddl(stmt: str, dim: int) -> str:
+    """Translate one SQLite DDL statement to Postgres. Only the embedding columns
+    differ structurally — TEXT (a float32 BLOB) becomes a pgvector `vector(dim)`.
+    `datetime('now')` defaults are left for the pool proxy to translate."""
+    stmt = re.sub(r"\bclaim_embedding\s+TEXT", f"claim_embedding vector({dim})", stmt)
+    stmt = re.sub(r"\bdoc_embedding\s+TEXT", f"doc_embedding vector({dim})", stmt)
+    # `embedding TEXT` on the chunks table (column starts a line in the DDL).
+    stmt = re.sub(r"(?m)^(\s*)embedding\s+TEXT", rf"\1embedding vector({dim})", stmt)
+    return stmt
+
+
+async def _run_migrations_pg(conn, dim: int) -> None:
+    for raw in DDL_STATEMENTS:
+        stmt = raw.strip()
+        if not stmt:
+            continue
+        # FTS5 has no Postgres equivalent — replaced by a generated tsvector column below.
+        if "VIRTUAL TABLE" in stmt.upper():
+            continue
+        stmt = _to_pg_ddl(stmt, dim)
+        try:
+            await conn.execute(stmt)
+        except Exception as e:
+            if "UNIQUE" in stmt.upper() and "already exists" not in str(e).lower():
+                await conn.execute(
+                    """
+                    DELETE FROM documents
+                    WHERE id NOT IN (
+                        SELECT MIN(id) FROM documents
+                        GROUP BY project_id, source_id
+                    )
+                    """
+                )
+                await conn.execute(stmt)
+
+    # Full-text search: a stored generated tsvector column + GIN index replaces
+    # the SQLite FTS5 virtual table. Auto-maintained, so no separate insert path.
+    await conn.execute(
+        "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS content_tsv tsvector "
+        "GENERATED ALWAYS AS (to_tsvector('english', content)) STORED"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING GIN(content_tsv)"
+    )
+
+    for raw in ALTER_STATEMENTS:
+        stmt = _to_pg_ddl(raw, dim).replace("ADD COLUMN ", "ADD COLUMN IF NOT EXISTS ")
+        try:
+            await conn.execute(stmt)
+        except Exception:
+            pass
+
+
+async def run_migrations(pool, create_vector_index: bool = False) -> None:
+    dim = get_settings().embedding_dim
     async with pool.acquire() as conn:
-        for stmt in DDL_STATEMENTS:
-            stmt = stmt.strip()
-            if stmt:
+        if is_postgres():
+            await _run_migrations_pg(conn, dim)
+        else:
+            for stmt in DDL_STATEMENTS:
+                stmt = stmt.strip()
+                if stmt:
+                    try:
+                        await conn.execute(stmt)
+                    except Exception as e:
+                        # Unique index creation will fail if duplicates exist — dedup first, then retry
+                        if "UNIQUE" in stmt and "already exists" not in str(e).lower():
+                            await conn.execute(
+                                """
+                                DELETE FROM documents
+                                WHERE id NOT IN (
+                                    SELECT MIN(id) FROM documents
+                                    GROUP BY project_id, source_id
+                                )
+                                """
+                            )
+                            await conn.execute(stmt)
+            # ALTER TABLE statements are not idempotent in SQLite; ignore duplicate column errors
+            for stmt in ALTER_STATEMENTS:
                 try:
                     await conn.execute(stmt)
-                except Exception as e:
-                    # Unique index creation will fail if duplicates exist — dedup first, then retry
-                    if "UNIQUE" in stmt and "already exists" not in str(e).lower():
-                        await conn.execute(
-                            """
-                            DELETE FROM documents
-                            WHERE id NOT IN (
-                                SELECT MIN(id) FROM documents
-                                GROUP BY project_id, source_id
-                            )
-                            """
-                        )
-                        await conn.execute(stmt)
-        # ALTER TABLE statements are not idempotent in SQLite; ignore duplicate column errors
-        for stmt in ALTER_STATEMENTS:
-            try:
-                await conn.execute(stmt)
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
         # Per-project disease vocabulary. The ALTER + backfill are paired inside
         # one try: the UPDATE runs ONLY the first time the column is added (when
@@ -365,9 +431,15 @@ async def run_migrations(pool: _Pool, create_vector_index: bool = False) -> None
     print("Migrations complete.")
 
 
-async def list_tables(pool: _Pool) -> list[str]:
+async def list_tables(pool) -> list[str]:
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT name FROM sqlite_master WHERE type IN ('table','shadow') ORDER BY name"
-        )
+        if is_postgres():
+            rows = await conn.fetch(
+                "SELECT tablename AS name FROM pg_tables "
+                "WHERE schemaname = 'public' ORDER BY tablename"
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','shadow') ORDER BY name"
+            )
     return [r["name"] for r in rows]

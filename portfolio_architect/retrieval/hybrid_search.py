@@ -13,11 +13,87 @@ from portfolio_architect.embedding import codec
 
 from portfolio_architect.embedding.client import embed_text
 from portfolio_architect.config import get_settings
-from portfolio_architect.db.pool import _ConnProxy
+from portfolio_architect.db.pool import _ConnProxy, is_postgres
 
 _settings = get_settings()
 
 RRF_K = 60
+
+
+async def _search_chunks_pg(conn, query: str, pid: str, k: int) -> list[dict]:
+    """Postgres hybrid search. Both legs run in the database so we never ship the
+    embedding blobs over the wire:
+      - vector leg: pgvector cosine distance (`<=>`), exact scan, ORDER BY … LIMIT.
+      - keyword leg: the generated `content_tsv` GIN index via `plainto_tsquery`.
+    Ranks are fused with RRF, identical to the SQLite path.
+    """
+    vector_ranked: dict[str, tuple[int, dict]] = {}
+    try:
+        q_emb = codec.encode(await embed_text(query))  # ndarray on PG (pgvector param)
+        rows = await conn.fetch(
+            "SELECT id, document_id, content FROM chunks "
+            "WHERE project_id = ? AND embedding IS NOT NULL "
+            "ORDER BY embedding <=> ? LIMIT ?",
+            pid, q_emb, k * 2,
+        )
+        for i, row in enumerate(rows):
+            vector_ranked[row["id"]] = (i + 1, row)
+    except Exception:
+        pass
+
+    keyword_ranked: dict[str, int] = {}
+    chunk_data: dict[str, dict] = {cid: row for cid, (_, row) in vector_ranked.items()}
+    try:
+        rows = await conn.fetch(
+            "SELECT id, document_id, content FROM chunks "
+            "WHERE project_id = ? AND content_tsv @@ plainto_tsquery('english', ?) "
+            "ORDER BY ts_rank(content_tsv, plainto_tsquery('english', ?)) DESC LIMIT ?",
+            pid, query, query, k * 2,
+        )
+        for i, row in enumerate(rows):
+            keyword_ranked[row["id"]] = i + 1
+            chunk_data.setdefault(row["id"], row)
+    except Exception:
+        pass
+
+    all_ids = set(vector_ranked) | set(keyword_ranked)
+    if not all_ids:
+        return []
+
+    fused: list[tuple[float, dict]] = []
+    for cid in all_ids:
+        v_rank = vector_ranked.get(cid, (None,))[0]
+        k_rank = keyword_ranked.get(cid)
+        score = 0.0
+        if v_rank is not None:
+            score += 1.0 / (RRF_K + v_rank)
+        if k_rank is not None:
+            score += 1.0 / (RRF_K + k_rank)
+        fused.append((score, chunk_data[cid]))
+
+    fused.sort(key=lambda x: x[0], reverse=True)
+    top = fused[:k]
+
+    doc_ids = list({row["document_id"] for _, row in top})
+    doc_source: dict[str, str] = {}
+    if doc_ids:
+        placeholders = ",".join("?" * len(doc_ids))
+        doc_rows = await conn.fetch(
+            f"SELECT id, source_id FROM documents WHERE id IN ({placeholders})",
+            *doc_ids,
+        )
+        doc_source = {r["id"]: r["source_id"] for r in doc_rows}
+
+    return [
+        {
+            "chunk_id": row["id"],
+            "document_id": row["document_id"],
+            "source_id": doc_source.get(row["document_id"], "unknown"),
+            "content": row["content"],
+            "score": score,
+        }
+        for score, row in top
+    ]
 
 
 def _fts_query(query: str) -> str:
@@ -36,6 +112,9 @@ async def search_chunks(
 ) -> list[dict]:
     k = top_k or _settings.retrieval_top_k
     pid = str(project_id)
+
+    if is_postgres():
+        return await _search_chunks_pg(conn, query, pid, k)
 
     # ── Vector leg ──────────────────────────────────────────────────────────
     vector_ranked: dict[str, tuple[int, dict]] = {}
