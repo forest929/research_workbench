@@ -9,6 +9,8 @@ questions ("compare A vs B", "what contradicts the majority view", "where are th
 gaps?") over your corpus — each reply retrieved, cited, and self-checked by the
 judge.
 
+📄 [Read the write-up](https://claude.ai/code/artifact/32fb57d8-e057-46ff-86c4-c4bcdb234f0d)
+
 The bundled demo corpus is **women's cancer drug evidence** (breast, ovarian,
 cervical, endometrial): ~10k PubMed papers → ~27k claims → ~440 multi-source
 clusters, each carrying a cited, synthesized answer.
